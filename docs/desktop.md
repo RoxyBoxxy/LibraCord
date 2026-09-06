@@ -30,6 +30,22 @@ Electron enables hardware acceleration by default. LibraCord exposes a user pref
 
 Restart the desktop app after changing the preference. Diagnose issues with Electron/Chromium GPU information and LiveKit statistics rather than assuming a selected 60 FPS capture target guarantees a 60 FPS encoded track—capture cadence, content motion, CPU/GPU load, bandwidth, and subscriber layers can all reduce delivered FPS.
 
+## Packaging
+
+Electron Builder packages the desktop shell. Build on the target operating system:
+
+```powershell
+npm run desktop:dist:windows
+```
+
+```sh
+npm run desktop:dist:linux
+```
+
+Artifacts are written to `release/`, which is ignored by Git. Windows builds include an NSIS installer and portable executable; Linux builds produce an AppImage.
+
+The [desktop build workflow](../.github/workflows/desktop-build.yml) runs both platform builds and uploads the results to the GitHub Actions run. Builds are unsigned. Windows SmartScreen and Linux desktop environments may warn users until platform signing is configured. Publishing a release should use immutable version tags and signed artifacts.
+
 ## Security
 
 - Keep context isolation enabled and expose narrow preload methods.

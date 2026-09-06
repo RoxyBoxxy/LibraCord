@@ -3,6 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "main": "desktop/main.cjs",
+  "description": "A self-hosted federated community chat client",
+  "author": "LibraCord contributors",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
   "workspaces": [
     "server",
     "client"
@@ -12,10 +19,50 @@
     "build": "npm run build -w client",
     "start": "npm run start -w server",
     "desktop": "node desktop/launch.cjs",
+    "desktop:dist": "electron-builder --publish never",
+    "desktop:dist:windows": "electron-builder --win nsis portable --publish never",
+    "desktop:dist:linux": "electron-builder --linux AppImage --publish never",
     "test": "npm run test -w server"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "concurrently": "^10.0.0",
-    "electron": "^44.2.0"
+    "electron": "^44.2.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "moe.puppygirl.libracord",
+    "productName": "LibraCord",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "desktop/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "artifactName": "LibraCord-Setup-${version}-${arch}.${ext}",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "portable": {
+      "artifactName": "LibraCord-Portable-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "artifactName": "LibraCord-${version}-${arch}.${ext}",
+      "category": "Network;Chat",
+      "target": [
+        "AppImage"
+      ]
+    }
   }
 }

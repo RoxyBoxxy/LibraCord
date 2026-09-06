@@ -1,5 +1,8 @@
 # LibraCord
 
+[![Tests and web build](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/ci.yml/badge.svg)](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/ci.yml)
+[![Desktop builds](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/desktop-build.yml/badge.svg)](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/desktop-build.yml)
+
 LibraCord is a self-hosted, federated community chat experiment inspired by Discord. It combines persistent text channels, direct messages, voice/video rooms, screen sharing, community administration, profile customization, and public instance discovery in one Vue and Node.js application.
 
 > [!WARNING]
@@ -102,6 +105,8 @@ For a public deployment, follow the [deployment guide](docs/deployment/README.md
 | --- | --- |
 | `npm run dev` | Start API and Vite development servers |
 | `npm run desktop` | Start the Electron desktop shell |
+| `npm run desktop:dist:windows` | Build Windows installer and portable desktop artifacts |
+| `npm run desktop:dist:linux` | Build a Linux AppImage |
 | `npm run build` | Build the Vue production bundle |
 | `npm start` | Start the Node server |
 | `npm test` | Run the server test suite |

@@ -5,6 +5,7 @@
 !.env.example
 node_modules
 client/dist
+release
 data
 uploads
 server/logs
