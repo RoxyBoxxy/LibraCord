@@ -1,5 +1,9 @@
 # LibraCord
 
+<p align="center">
+  <img src="docs/assets/libracord-banner.png" alt="LibraCord — geometric Libra scales connected by chat nodes" width="100%">
+</p>
+
 [![Tests and web build](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/ci.yml/badge.svg)](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/ci.yml)
 [![Desktop builds](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/desktop-build.yml/badge.svg)](https://github.com/RoxyBoxxy/LibraCord/actions/workflows/desktop-build.yml)
 

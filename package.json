@@ -44,6 +44,7 @@
       "package.json"
     ],
     "win": {
+      "icon": "docs/assets/libracord-logo.png",
       "target": [
         "nsis",
         "portable"
@@ -58,6 +59,7 @@
       "artifactName": "LibraCord-Portable-${version}-${arch}.${ext}"
     },
     "linux": {
+      "icon": "docs/assets/libracord-logo.png",
       "artifactName": "LibraCord-${version}-${arch}.${ext}",
       "category": "Network;Chat",
       "target": [
