@@ -1,0 +1,1 @@
+{"name":"@libracord/server","private":true,"type":"module","scripts":{"dev":"node src/dev.js","start":"node src/index.js","test":"node --test"},"dependencies":{"@livekit/protocol":"^1.41.0","cors":"^2.8.6","dotenv":"^17.4.2","express":"^5.2.1","livekit-server-sdk":"^2.18.0","multer":"^2.3.0","socket.io":"^4.8.3"}}

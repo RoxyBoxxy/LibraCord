@@ -1,0 +1,16 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+node_modules
+client/dist
+data
+uploads
+server/logs
+npm-debug.log*
+*.md
+desktop
+browser-desktop
+browser-service
+tools

@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.*
+!/.env.example
+client/dist/
+data/
+uploads/
+server/data/
+server/uploads/
+server/logs/
+tools/livekit/
+npm-debug.log*
+*.log
+.DS_Store
+Thumbs.db

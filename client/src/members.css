@@ -1,0 +1,113 @@
+@media (min-width: 1051px) {
+  .shell {
+    grid-template-columns: 76px 260px minmax(0, 1fr) 240px;
+  }
+  .admin {
+    grid-column: 3/-1;
+  }
+}
+.member-list {
+  padding: 22px 10px;
+  background: #191a23;
+  overflow-y: auto;
+  transition: transform .28s ease, opacity .2s ease;
+}
+@media (min-width: 1051px) {
+  .shell.members-collapsed { grid-template-columns: 286px minmax(0, 1fr) 0; }
+  .shell.members-collapsed .member-list { transform: translateX(110%); opacity: 0; pointer-events:none; overflow:hidden; }
+}
+.member-list > .label {
+  margin: 0 8px 10px;
+}
+.member-role-heading { margin:14px 8px 5px; color:#aab4c8; font-size:12px; font-weight:700; }
+.member-list > button {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: #bbb;
+  text-align: left;
+  cursor: pointer;
+}
+.member-list > button:hover {
+  background: #292b37;
+  color: #fff;
+}
+.member-list img,
+.member-list .avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.member-list > button > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+.member-list strong,
+.member-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-list small {
+  color: #777b8b;
+  font-size: 10px;
+}
+.context-dismiss {
+  position: fixed;
+  z-index: 39;
+  inset: 0;
+}
+.context-menu {
+  position: fixed;
+  z-index: 40;
+  width: 190px;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid #333642;
+  border-radius: 8px;
+  background: #111219;
+  box-shadow: 0 10px 35px #0009;
+}
+.context-menu button {
+  display: block;
+  width: 100%;
+  padding: 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #ddd;
+  text-align: left;
+  cursor: pointer;
+}
+.context-menu button:hover {
+  background: #7857ff;
+  color: #fff;
+}
+.context-menu .danger {
+  color: #ff7f8b;
+}
+.context-menu .danger:hover {
+  background: #c43d4a;
+  color: #fff;
+}
+.context-menu .context-separator {
+  height: 1px;
+  margin: 5px;
+  background: #30323d;
+}
+.app-context-menu {
+  min-width: 200px;
+  user-select: none;
+}
+@media (max-width: 1050px) {
+  .member-list {
+    display: none;
+  }
+}

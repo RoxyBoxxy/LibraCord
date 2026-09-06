@@ -1,0 +1,33 @@
+.avatar-button,
+.member-avatar-wrap {
+  position: relative;
+}
+.mini-profile-decoration {
+  position: absolute;
+  z-index: 2;
+  inset: -4px;
+  display: grid;
+  place-items: start end;
+  border: 2px solid var(--decoration-primary, #62efc6);
+  border-radius: 50%;
+  background: transparent !important;
+  box-shadow: 0 0 10px
+    color-mix(in srgb, var(--decoration-primary, #62efc6) 55%, transparent);
+  pointer-events: none;
+}
+.mini-profile-decoration img {
+  position: absolute;
+  right: -5px;
+  bottom: -4px;
+  width: 18px;
+  height: 18px;
+  border-radius: 6px;
+  background: #08121d;
+  object-fit: contain;
+}
+.mini-profile-decoration b {
+  margin: -5px -4px 0 0;
+  color: #fff;
+  font-size: 11px;
+  text-shadow: 0 1px 5px #000;
+}

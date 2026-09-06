@@ -1,0 +1,126 @@
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+/* Filters on the root element create inconsistent containing blocks in Firefox. */
+[data-theme="midnight"] {
+  filter: none !important;
+}
+
+.shell {
+  position: relative;
+  grid-template-rows: minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.servers,
+.channels,
+.chat,
+.admin {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.channels {
+  height: 100%;
+}
+
+.chat {
+  height: 100%;
+}
+
+.messages {
+  min-height: 0;
+}
+
+.channels section button {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.server {
+  display: grid;
+  place-items: center;
+}
+
+.user-controls {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+}
+
+.channels footer .user-controls button {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #aaaebb;
+  cursor: pointer;
+}
+
+.channels footer .user-controls button:hover {
+  background: #30313c;
+  color: #fff;
+}
+
+.channels footer .user-controls button.controlActive {
+  background: #43272e;
+  color: #ff8d99;
+}
+
+.account strong {
+  max-width: 72px;
+  white-space: nowrap;
+}
+
+.settings-overlay {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.settings-nav,
+.settings-content {
+  min-height: 0;
+}
+
+.close-settings {
+  display: grid;
+  place-items: center;
+}
+
+@media (max-width: 850px) {
+  .shell { grid-template-columns: 64px 220px minmax(0, 1fr); }
+  .servers { padding-inline: 8px; }
+  .server { width: 44px; height: 44px; }
+  .account { display: none; }
+}
+
+@media (max-width: 620px) {
+  .shell { grid-template-columns: 64px minmax(0, 1fr); }
+  .channels {
+    position: absolute;
+    z-index: 5;
+    inset: 0 auto 0 64px;
+    width: 220px;
+    box-shadow: 12px 0 35px #0008;
+  }
+  .chat,
+  .admin { grid-column: 2; }
+  .settings-overlay { grid-template-columns: 130px minmax(0, 1fr); }
+  .settings-content { padding-inline: 18px; }
+}

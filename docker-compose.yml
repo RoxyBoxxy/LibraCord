@@ -1,0 +1,126 @@
+name: libracord
+
+services:
+  app:
+    image: ${LIBRACORD_IMAGE:-libracord:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATABASE_PATH: /app/data/libracord.db
+      UPLOADS_PATH: /app/uploads
+      CLIENT_DIST_PATH: /app/client/dist
+      LIVEKIT_INTERNAL_URL: ws://livekit:7880
+      BROWSER_SERVICE_URL: http://browser-service:8090
+      BROWSER_DESKTOP_CONTROL_URL: http://browser-desktop:8091
+      BROWSER_RTMP_HOST: ingress
+    ports:
+      - "${APP_BIND_IP:-0.0.0.0}:${PORT:-3002}:${PORT:-3002}"
+    volumes:
+      - libracord-data:/app/data
+      - libracord-uploads:/app/uploads
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  livekit:
+    image: livekit/livekit-server:${LIVEKIT_VERSION:-latest}
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        bind_addresses:
+          - "0.0.0.0"
+        rtc:
+          tcp_port: ${LIVEKIT_TCP_PORT:-7881}
+          udp_port: ${LIVEKIT_UDP_PORT:-7882}
+          use_external_ip: ${LIVEKIT_USE_EXTERNAL_IP:-true}
+          node_ip: "${LIVEKIT_NODE_IP:-}"
+        turn:
+          enabled: ${LIVEKIT_TURN_ENABLED:-false}
+          domain: "${LIVEKIT_TURN_DOMAIN:-}"
+          udp_port: ${LIVEKIT_TURN_UDP_PORT:-3478}
+          tls_port: 0
+        keys:
+          "${LIVEKIT_API_KEY}": "${LIVEKIT_API_SECRET}"
+        redis:
+          address: redis:6379
+        ingress:
+          rtmp_base_url: "${LIVEKIT_RTMP_URL:-rtmp://localhost:1935/live}"
+          whip_base_url: "${LIVEKIT_WHIP_URL:-http://localhost:8080/whip}"
+    ports:
+      - "${LIVEKIT_HTTP_BIND_IP:-127.0.0.1}:${LIVEKIT_HTTP_PORT:-7880}:7880"
+      - "${LIVEKIT_TCP_PORT:-7881}:${LIVEKIT_TCP_PORT:-7881}/tcp"
+      - "${LIVEKIT_UDP_PORT:-7882}:${LIVEKIT_UDP_PORT:-7882}/udp"
+      - "${LIVEKIT_TURN_UDP_PORT:-3478}:${LIVEKIT_TURN_UDP_PORT:-3478}/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  ingress:
+    image: livekit/ingress:${LIVEKIT_INGRESS_VERSION:-latest}
+    profiles: ["ingress"]
+    env_file: .env
+    environment:
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      LIVEKIT_WS_URL: ws://livekit:7880
+      INGRESS_CONFIG_BODY: |
+        log_level: info
+        ws_url: ws://livekit:7880
+        redis:
+          address: redis:6379
+        insecure: true
+        health_port: 8081
+        rtmp_port: 1935
+        whip_port: 8080
+        rtc_config:
+          udp_port: 7885
+    ports:
+      - "${INGRESS_RTMP_PORT:-1935}:1935/tcp"
+      - "${INGRESS_WHIP_PORT:-8080}:8080/tcp"
+      - "${INGRESS_UDP_PORT:-7885}:7885/udp"
+    depends_on:
+      redis:
+        condition: service_healthy
+      livekit:
+        condition: service_started
+    restart: unless-stopped
+
+  browser-service:
+    build: ./browser-service
+    profiles: ["browser"]
+    env_file: .env
+    environment:
+      PORT: 8090
+    restart: unless-stopped
+
+  browser-desktop:
+    build: ./browser-desktop
+    profiles: ["browser"]
+    env_file: .env
+    ports:
+      - "${BROWSER_DESKTOP_PORT:-6080}:6080"
+    restart: unless-stopped
+
+volumes:
+  libracord-data:
+  libracord-uploads:
+  redis-data:

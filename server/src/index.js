@@ -1,0 +1,140 @@
+import dotenv from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+dotenv.config({ path: resolve(dirname(fileURLToPath(import.meta.url)), "../../.env") });
+
+import { createServer } from "node:http";
+import { Server } from "socket.io";
+import { createApp } from "./app.js";
+import {
+  channelExists, createDirectMessage, createMessage, findChannel,
+  listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
+} from "./db.js";
+import { getUser } from "./auth.js";
+
+const port = Number(process.env.PORT || 3002);
+const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
+  .split(",").map((value) => value.trim()).filter(Boolean);
+const server = createServer(createApp());
+const io = new Server(server, {
+  cors: {
+    origin: true,
+    credentials: true,
+  },
+  transports: ["websocket", "polling"],
+  allowRequest(request, done) {
+    const origin = request.headers.origin;
+    if (!origin) return done(null, true);
+    try {
+      const originUrl = new URL(origin);
+      const forwardedHost = String(request.headers["x-forwarded-host"] || "").split(",")[0].trim();
+      const requestHost = forwardedHost || request.headers.host;
+      const explicitlyAllowed = allowedOrigins.some((value) => {
+        try { return new URL(value).origin === originUrl.origin; } catch { return false; }
+      });
+      return done(null, explicitlyAllowed || originUrl.host === requestHost);
+    } catch {
+      return done(null, false);
+    }
+  },
+});
+
+function refreshNotificationRooms(socket) {
+  for (const room of socket.rooms)
+    if (room.startsWith("channel-notify:")) socket.leave(room);
+  for (const community of listCommunities(socket.user.id))
+    for (const channel of community.channels || [])
+      if (channel.kind === "text" && userCanAccessChannel(channel.id, socket.user.id))
+        socket.join(`channel-notify:${channel.id}`);
+}
+
+function refreshAllNotificationRooms() {
+  for (const client of io.sockets.sockets.values()) refreshNotificationRooms(client);
+}
+
+io.use((socket, next) => {
+  const user = getUser(socket.request);
+  if (!user) return next(new Error("Authentication required"));
+  socket.user = user;
+  next();
+});
+
+io.on("connection", (socket) => {
+  socket.join(`user:${socket.user.id}`);
+  refreshNotificationRooms(socket);
+
+  socket.on("profile:updated", () => io.emit("profile:updated", { userId: socket.user.id }));
+  socket.on("subscriptions:refresh", () => refreshNotificationRooms(socket));
+  socket.on("channel:join", (id) => {
+    if (channelExists(id, "text") && userCanAccessChannel(id, socket.user.id))
+      socket.join(`channel:${id}`);
+  });
+  socket.on("channel:leave", (id) => socket.leave(`channel:${id}`));
+  socket.on("typing:start", (id) => {
+    if (channelExists(id, "text") && userCanSendToChannel(id, socket.user.id))
+      socket.to(`channel:${id}`).emit("typing:update", {
+        channelId: id, userId: socket.user.id, name: socket.user.display_name, typing: true,
+      });
+  });
+  socket.on("typing:stop", (id) => socket.to(`channel:${id}`).emit("typing:update", {
+    channelId: id, userId: socket.user.id, typing: false,
+  }));
+  socket.on("voice:changed", (id) => {
+    const channel = findChannel(String(id || ""));
+    if (channel?.kind === "voice" && userCanConnectToChannel(channel.id, socket.user.id))
+      io.emit("voice:presence-changed", channel.community_id);
+  });
+  socket.on("message:create", (input, ack = () => {}) => {
+    const channelId = String(input?.channelId || "");
+    const body = String(input?.body || "").trim().slice(0, 4000);
+    const attachments = Array.isArray(input?.attachments) ? input.attachments.slice(0, 8) : [];
+    const contentWarning = String(input?.contentWarning || "").trim().slice(0, 120);
+    const replyTo = input?.replyTo ? Number(input.replyTo) : null;
+    if (!channelExists(channelId, "text") || !userCanSendToChannel(channelId, socket.user.id) || (!body && !attachments.length))
+      return ack({ ok: false, error: "Invalid message" });
+    const message = createMessage({ channelId, authorId: socket.user.id, authorName: socket.user.display_name, body, attachments, contentWarning, replyTo });
+    io.to(`channel-notify:${channelId}`).emit("message:created", message);
+    ack({ ok: true });
+  });
+  socket.on("community:changed", (payload) => {
+    const communityId = String(payload?.communityId || "");
+    if (!communityId) return;
+    refreshAllNotificationRooms();
+    io.emit("community:changed", { communityId });
+  });
+  socket.on("dm:send", (input, ack = () => {}) => {
+    const recipientId = String(input?.recipientId || "");
+    const body = String(input?.body || "").trim().slice(0, 12000);
+    if (!recipientId || !body || recipientId === socket.user.id)
+      return ack({ ok: false, error: "Invalid direct message" });
+    try {
+      const saved = createDirectMessage(socket.user.id, recipientId, body);
+      io.to(`user:${recipientId}`).emit("dm:created", saved);
+      socket.emit("dm:created", saved);
+      ack({ ok: true });
+    } catch {
+      ack({ ok: false, error: "Unable to send direct message" });
+    }
+  });
+  socket.on("dm:typing", (payload) => {
+    const recipientId = String(payload?.recipientId || "");
+    if (recipientId) io.to(`user:${recipientId}`).emit("dm:typing", {
+      userId: socket.user.id, name: socket.user.display_name, typing: Boolean(payload?.typing),
+    });
+  });
+  socket.on("dm:call-invite", (payload) => {
+    const recipientId = String(payload?.recipientId || "");
+    if (recipientId) io.to(`user:${recipientId}`).emit("dm:call-invite", {
+      callerId: socket.user.id, callerName: socket.user.display_name,
+      mode: payload?.mode || "video", callId: payload?.callId,
+    });
+  });
+  socket.on("dm:call-response", (payload) => {
+    const recipientId = String(payload?.recipientId || "");
+    if (recipientId) io.to(`user:${recipientId}`).emit("dm:call-response", {
+      fromId: socket.user.id, accepted: Boolean(payload?.accepted), callId: payload?.callId,
+    });
+  });
+});
+
+server.listen(port, () => console.log(`LibraCord API listening on http://localhost:${port}`));

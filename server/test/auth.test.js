@@ -1,0 +1,2 @@
+import test from 'node:test';import assert from 'node:assert/strict';import{hashPassword,verifyPassword}from'../src/auth.js'
+test('passwords are salted and verified with scrypt',async()=>{const first=await hashPassword('a secure password'),second=await hashPassword('a secure password');assert.notEqual(first,second);assert.equal(await verifyPassword('a secure password',first),true);assert.equal(await verifyPassword('wrong password',first),false)})

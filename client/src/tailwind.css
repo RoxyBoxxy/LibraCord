@@ -1,0 +1,9 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans:
+    "Manrope", "Segoe UI Variable", ui-sans-serif, system-ui, sans-serif;
+  --color-orbit-400: #7dd3fc;
+  --color-orbit-500: #38bdf8;
+  --color-aurora-500: #a78bfa;
+}
