@@ -24,6 +24,20 @@ LibraCord is a self-hosted, federated community chat experiment inspired by Disc
 - Optional shared browser desktop
 - One root `.env` and one Docker Compose project for quick hosting
 
+## Screenshots
+
+| Federated home and Pulse | Friends |
+| --- | --- |
+| ![LibraCord federated home and Pulse](docs/assets/screenshots/01-overview.png) | ![LibraCord friends page](docs/assets/screenshots/02-friends.png) |
+
+### Community chat
+
+![LibraCord community text channel with member presence and realtime messages](docs/assets/screenshots/03-community.png)
+
+| Profile | Profile customization |
+| --- | --- |
+| ![LibraCord profile card](docs/assets/screenshots/04-profile.png) | ![LibraCord profile customization settings and live preview](docs/assets/screenshots/05-profile-customization.png) |
+
 ## Stack
 
 | Layer | Technology |

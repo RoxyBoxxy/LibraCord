@@ -22,6 +22,7 @@
     "desktop:dist": "electron-builder --publish never",
     "desktop:dist:windows": "electron-builder --win nsis portable --publish never",
     "desktop:dist:linux": "electron-builder --linux AppImage --publish never",
+    "screenshots": "node tools/launch-screenshot-capture.cjs",
     "test": "npm run test -w server"
   },
   "dependencies": {

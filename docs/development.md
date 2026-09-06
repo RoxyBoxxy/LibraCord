@@ -44,6 +44,18 @@ docker compose config       # inspect resolved service configuration
 docker compose logs -f      # follow all container logs
 ```
 
+## README screenshots
+
+Create the ignored file `.env.screenshots.local` with a disposable account:
+
+```dotenv
+SCREENSHOT_URL=https://chat.example.com
+SCREENSHOT_USERNAME=dev@example.com
+SCREENSHOT_PASSWORD=temporary-password
+```
+
+Then run `npm run screenshots`. The Electron capture helper signs in and captures the Home/Pulse, Friends, community chat, profile card, and profile-customization views at `1600x1000`. It sanitizes demo chat text only in the local renderer and writes PNG files to `docs/assets/screenshots`. It never writes the disposable credentials into the repository. Review every image for personal data before committing it, then rotate or delete the account.
+
 After changing Compose or `.env`:
 
 ```sh
