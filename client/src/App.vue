@@ -1627,6 +1627,18 @@ async function joinFromInvite() {
   history.replaceState({}, "", "/");
   if (joined) await chooseGuild(joined);
 }
+async function joinRemoteCommunity(guild) {
+  error.value = "";
+  try {
+    await api("/api/v1/federation/memberships", {
+      method: "POST",
+      body: JSON.stringify({ address: guild.address }),
+    });
+    guild.membership_status = "pending";
+  } catch (e) {
+    error.value = e.message;
+  }
+}
 async function removeCommunityMember(member) {
   if (!confirm(`Remove ${member.display_name} from this community?`)) return;
   await api(`/api/v1/guilds/${activeCommunityId.value}/members/${member.id}`, {
@@ -2482,6 +2494,16 @@ socket.on("profile:updated", async ({ userId } = {}) => {
 socket.on("community:changed", ({ communityId } = {}) => {
   refreshCommunityFromServer(communityId);
 });
+socket.on("federation:membership", async () => {
+  communities.value = await api("/api/communities");
+  if (homeTab.value === "discover") discoverCommunities.value = (await api("/api/v1/discovery/communities")).communities;
+});
+socket.on("federation:community-deleted", async () => {
+  communities.value = await api("/api/communities");
+});
+socket.on("federation:community-changed", async () => {
+  communities.value = await api("/api/communities");
+});
 socket.on("dm:created", async (message) => {
   const otherId = message.sender_id === user.value.id ? message.recipient_id : message.sender_id;
   const isOwnMessage = message.sender_id === user.value.id;
@@ -2498,6 +2520,12 @@ socket.on("dm:created", async (message) => {
   }
   const decrypted = await decryptDm(message.body, otherId);
   if (!dmMessages.value.some((item) => item.id === message.id)) dmMessages.value.push({ ...message, body: decrypted });
+});
+socket.on("dm:encrypted", (message) => {
+  dmUnread.value += 1;
+  const sender = String(message?.sender_global_id || "Remote user");
+  showDesktopNotification(`Encrypted message from ${sender}`, "Open LibraCord to verify the sender key and decrypt this message.", () => openHome("dm"));
+  playUiSound("message");
 });
 socket.on("dm:call-invite", ({ callerId, callerName, mode, callId } = {}) => {
   incomingDmCall.value = { callerId, callerName, mode: mode || "video", callId };
@@ -3489,7 +3517,10 @@ watch(
             v-if="!guild.remote && communities.some((entry) => entry.id === guild.id)"
             @click="chooseGuild(guild)"
           >Open community</button>
-          <button v-else disabled>{{ guild.remote ? guild.address || 'Remote community' : 'Invite required' }}</button>
+          <button v-else-if="guild.remote" :disabled="guild.membership_status === 'pending' || guild.membership_status === 'joined'" @click="joinRemoteCommunity(guild)">
+            {{ guild.membership_status === 'joined' ? 'Joined' : guild.membership_status === 'pending' ? 'Request sent' : `Join ${guild.address || 'community'}` }}
+          </button>
+          <button v-else disabled>Invite required</button>
         </article>
       </div>
       <div v-else class="creative-market">

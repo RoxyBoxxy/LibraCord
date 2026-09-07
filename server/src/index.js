@@ -11,6 +11,7 @@ import {
   listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
 } from "./db.js";
 import { getUser } from "./auth.js";
+import { deliverFederationOutbox, federationDomain, federationEvents, publishCommunitySnapshot } from "./federation.js";
 
 const port = Number(process.env.PORT || 3002);
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
@@ -101,6 +102,7 @@ io.on("connection", (socket) => {
     if (!communityId) return;
     refreshAllNotificationRooms();
     io.emit("community:changed", { communityId });
+    void publishCommunitySnapshot(communityId).catch((error) => console.error("Federation publish failed", error.message));
   });
   socket.on("dm:send", (input, ack = () => {}) => {
     const recipientId = String(input?.recipientId || "");
@@ -136,5 +138,32 @@ io.on("connection", (socket) => {
     });
   });
 });
+
+federationEvents.on("community:changed", ({ communityId }) => {
+  refreshAllNotificationRooms();
+  io.emit("community:changed", { communityId, federated: true });
+});
+federationEvents.on("dm:encrypted", (message) => {
+  const suffix = `#${federationDomain()}`;
+  if (!String(message.recipient_global_id || "").endsWith(suffix)) return;
+  const recipientId = message.recipient_global_id.slice(0, -suffix.length);
+  io.to(`user:${recipientId}`).emit("dm:encrypted", message);
+});
+federationEvents.on("membership:changed", (membership) => {
+  const suffix = `#${federationDomain()}`;
+  if (!String(membership.user_global_id || "").endsWith(suffix)) return;
+  const userId = membership.user_global_id.slice(0, -suffix.length);
+  io.to(`user:${userId}`).emit("federation:membership", membership);
+});
+federationEvents.on("community:deleted", ({ communityGlobalId }) =>
+  io.emit("federation:community-deleted", { communityGlobalId }));
+federationEvents.on("remote-community:changed", ({ communityGlobalId }) =>
+  io.emit("federation:community-changed", { communityGlobalId }));
+
+const federationRetryTimer = setInterval(() => {
+  void deliverFederationOutbox().catch((error) => console.error("Federation delivery failed", error.message));
+}, 10_000);
+federationRetryTimer.unref();
+void deliverFederationOutbox();
 
 server.listen(port, () => console.log(`LibraCord API listening on http://localhost:${port}`));

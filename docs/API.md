@@ -74,6 +74,9 @@ Channel updates support topic, category, position, slowmode, content visibility,
 | `PUT` | `/api/v1/guilds/:id/members/:userId/roles` | Replace a member's role IDs |
 | `GET` | `/api/v1/guilds/:id/permission-overrides` | List category/channel overrides |
 | `PUT` | `/api/v1/guilds/:id/permission-overrides/:overrideId` | Create/update a role/member allow-deny mask |
+| `GET|POST` | `/api/v1/guilds/:id/bans` | List or create local/remote actor bans |
+| `DELETE` | `/api/v1/guilds/:id/bans/:actor` | Remove a ban (URL-encode the portable actor ID) |
+| `GET` | `/api/v1/guilds/:id/moderation-actions` | Read the replicated moderation audit trail |
 
 Permission masks are serialized as decimal strings because JavaScript JSON cannot safely represent every large bit mask. Current permission bits include create invite, administrator, manage channels/community, view channel, send messages, connect, manage roles, and manage webhooks. Clients must treat the server calculation as authoritative.
 
@@ -111,7 +114,28 @@ Message content is limited to 4,000 characters, a message can reference up to ei
 | `GET` | `/api/v1/crypto/key/:userId` | Fetch a user's experimental DM public key |
 | `PUT` | `/api/v1/crypto/key` | Publish the current user's public key |
 
-Local `user@localhost:port` lookup is supported. General cross-instance friend requests and DMs are not yet implemented. DM bodies are expected to be client-encrypted when key setup succeeds; see [Security](security.md) for limitations.
+Local `user@localhost:port` lookup is supported. Cross-instance DMs use the signed ciphertext endpoints below; see [Security](security.md) for encryption limitations.
+
+## Federation protocol
+
+| Method | Path | Access | Description |
+| --- | --- | --- | --- |
+| `GET` | `/.well-known/libracord` | Public | Instance capabilities and Ed25519 signing key |
+| `POST` | `/api/v1/federation/inbox` | Signed peer | Idempotently receive and apply an event |
+| `POST` | `/api/v1/federation/sync` | Signed peer | Return addressed events after an ISO cursor |
+| `GET` | `/api/v1/federation/communities/:id` | Public | Resolve a community ID or friendly slug to a snapshot |
+| `GET` | `/api/v1/federation/identities/:id` | Public | Resolve a public portable identity and DM key |
+| `GET|POST` | `/api/v1/federation/memberships` | User | List or request durable remote memberships |
+| `GET|POST` | `/api/v1/federation/dms` | User | Read/send opaque encrypted cross-instance messages |
+| `GET` | `/api/v1/crypto/federated-key` | User | Inspect a remote key and fingerprint |
+| `PUT` | `/api/v1/crypto/federated-key/verify` | User | Mark an exact key fingerprint verified |
+| `POST` | `/api/v1/identity/migrations` | User | Create a signed one-use migration bundle |
+| `POST` | `/api/v1/identity/migrations/import` | User | Claim and link a source identity |
+| `POST` | `/api/v1/federation/abuse-reports` | User | Report a peer or portable actor |
+| `GET|PUT` | `/api/admin/federation-policies[/:peerId]` | Admin | Inspect/update trust and rate policy |
+| `GET` | `/api/admin/federation-abuse-reports` | Admin | Review federation abuse reports |
+
+See [Federation](federation.md) for signing, authority, conflict, retry, and reconciliation rules.
 
 ## Voice and shared browser
 

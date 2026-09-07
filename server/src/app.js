@@ -79,10 +79,20 @@ import {
   createDirectMessage,
   setDmPublicKey,
   listFriends, sendFriendRequest, listFriendRequests, acceptFriendRequest, removeFriend,
+  listRemoteCommunitiesForUser, listFederatedDms, findRemoteIdentity,
+  findFederatedDmKey, listPeerPolicies, savePeerPolicy, createAbuseReport, listAbuseReports,
+  communityFederationSnapshot,
+  findPeerByDomain, saveRemoteIdentity,
+  findCommunityByReference, listGuildBans, banGuildActor, unbanGuildActor, listModerationActions,
 } from "./db.js";
 import { proxyAsset, sendAsset, storeAsset } from "./assets.js";
 import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js";
 import { checkBrowserNavigation } from "./plugins/browser-policy.js";
+import {
+  canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope,
+  publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
+  syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
+} from "./federation.js";
 import { Permissions, requireGuildPermission } from "./permissions.js";
 import {
   endSession,
@@ -135,6 +145,7 @@ const homeServer =
   })();
 const livekitPublicUrl = process.env.LIVEKIT_URL || "ws://localhost:7880";
 const livekitInternalUrl = process.env.LIVEKIT_INTERNAL_URL || livekitPublicUrl;
+const federatedAssetUrl = (value) => value ? new URL(value, `${String(process.env.PUBLIC_URL || `http://${homeServer}`).replace(/\/$/, "")}/`).href : "";
 const publicUser = (user) => ({
   id: user.id,
   email: user.email,
@@ -224,12 +235,40 @@ export function createApp() {
       credentials: true,
     }),
   );
-  app.use(express.json({ limit: "32kb" }));
+  app.use(express.json({ limit: "512kb" }));
   app.use(
     "/uploads",
     express.static(uploadsDirectory, { fallthrough: false, maxAge: "7d" }),
   );
   app.get("/health", (_req, res) => res.json({ ok: true }));
+
+  // Publish one convergent community snapshot after successful local mutations.
+  // Capturing the channel/category owner before a DELETE keeps the hook reliable.
+  app.use((req, res, next) => {
+    if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) return next();
+    const guildMatch = req.path.match(/^\/api\/v1\/guilds\/([^/]+)/);
+    const channelMatch = req.path.match(/^\/api\/v1\/channels\/([^/]+)/);
+    const categoryMatch = req.path.match(/^\/api\/v1\/categories\/([^/]+)/);
+    const guildId = guildMatch?.[1] || (channelMatch ? findChannel(channelMatch[1])?.community_id : null) ||
+      (categoryMatch ? findCategory(categoryMatch[1])?.guild_id : null);
+    const deletingGuild = req.method === "DELETE" && /^\/api\/v1\/guilds\/[^/]+$/.test(req.path);
+    const deletePeers = deletingGuild && guildId ? listPeers().filter((peer) => peer.status === "allowed") : [];
+    res.on("finish", () => {
+      if (guildId && res.statusCode < 400 && req.method !== "GET") {
+        const publication = findCommunity(guildId) ? publishCommunitySnapshot(guildId) :
+          deletingGuild ? publishCommunityDeleted(guildId, deletePeers) : Promise.resolve();
+        void publication.catch((error) => console.error("Federation publish failed", error.message));
+      }
+      if (/^\/api\/users\/me(?:\/|$)/.test(req.path) && res.statusCode < 400 && req.user) {
+        const identity = findPublicUser(req.user.id);
+        for (const peer of listPeers().filter((item) => item.status === "allowed"))
+          void queueFederationEvent({ peer, type: "identity.upsert", entityId: `${identity.id}#${federationDomain()}`,
+            payload: { id: identity.id, username: identity.username, display_name: identity.display_name,
+              avatar_url: federatedAssetUrl(identity.avatar_url), banner_url: federatedAssetUrl(identity.banner_url), dm_public_key: identity.dm_public_key } }).catch(() => {});
+      }
+    });
+    next();
+  });
 
   app.get("/api/auth/me", (req, res) => {
     const user = getUser(req);
@@ -473,6 +512,52 @@ export function createApp() {
         address: `${String(community.name || community.id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}#${homeServer}`,
       })),
     });
+  });
+  app.post("/api/v1/federation/inbox", async (req, res, next) => {
+    try {
+      const result = await processIncomingEnvelope(req.body);
+      res.status(result.duplicate ? 200 : 202).json(result);
+    } catch (error) {
+      if (error.status === 429) res.set("retry-after", "60");
+      res.status(error.status || 400).json({ error: error.message });
+    }
+  });
+  app.post("/api/v1/federation/sync", async (req, res) => {
+    try {
+      await verifyEnvelope(req.body);
+      if (req.body.type !== "sync.request") return res.status(400).json({ error: "Expected a sync.request envelope" });
+      const events = syncEvents(req.body);
+      return res.json({ events, cursor: events.at(-1)?.occurred_at || req.body.payload?.after || "" });
+    } catch (error) {
+      if (error.status === 429) res.set("retry-after", "60");
+      return res.status(error.status || 400).json({ error: error.message });
+    }
+  });
+  app.post("/api/v1/federation/migrations/:id/claim", (req, res) => {
+    const migration = claimLocalMigration(req.params.id, req.body?.secret);
+    return migration ? res.json({ bundle: migration.bundle }) : res.status(404).json({ error: "Migration claim is invalid or expired" });
+  });
+  app.get("/api/v1/federation/communities/:id", (req, res) => {
+    const community = findCommunityByReference(req.params.id);
+    const snapshot = community ? communityFederationSnapshot(community.id, federationDomain()) : null;
+    if (!snapshot) return res.status(404).json({ error: "Community not found" });
+    const { channels: _channels, categories: _categories, roles: _roles, permission_overrides: _overrides,
+      members: _members, member_roles: _memberRoles, remote_members: _remoteMembers, bans: _bans,
+      moderation_actions: _moderation, ...publicCommunity } = snapshot;
+    return res.json({ community: publicCommunity });
+  });
+  app.get("/api/v1/federation/identities/:id", (req, res) => {
+    const identity = findPublicUser(req.params.id);
+    return identity ? res.json({ identity: { ...publicProfile(identity), dm_public_key: identity.dm_public_key || "" } }) :
+      res.status(404).json({ error: "Identity not found" });
+  });
+  app.get("/api/v1/federation/memberships", requireUser, (req, res) =>
+    res.json({ communities: listRemoteCommunitiesForUser(`${req.user.id}#${federationDomain()}`) }));
+  app.post("/api/v1/federation/memberships", requireUser, async (req, res) => {
+    try {
+      const event = await createRemoteJoin(req.user, req.body?.address);
+      return res.status(202).json({ status: "pending", event_id: event.event_id });
+    } catch (error) { return res.status(400).json({ error: error.message }); }
   });
   app.get("/api/v1/home/federated", requireUser, async (_req, res, next) => {
     try {
@@ -754,18 +839,23 @@ export function createApp() {
       ? res.json({ user: updated })
       : res.status(404).json({ error: "User not found" });
   });
+  const remoteGuildsFor = (userId) => listRemoteCommunitiesForUser(`${userId}#${federationDomain()}`).map((remote) => ({
+    ...remote.state, id: remote.global_id, global_id: remote.global_id, address: remote.address,
+    remote: true, origin: remote.origin, membership_status: remote.status,
+  }));
   app.get("/api/v1/guilds", requireUser, (_req, res) =>
-    res.json({ guilds: listCommunities(_req.user.id) }),
+    res.json({ guilds: [...listCommunities(_req.user.id), ...remoteGuildsFor(_req.user.id)] }),
   );
   app.get("/api/v1/discovery/communities", requireUser, async (_req, res, next) => {
     try {
       const remote = await aggregateFederatedHome(listPeers());
+      const memberships = new Map(remoteGuildsFor(_req.user.id).map((community) => [community.address, community.membership_status]));
       const local = listCommunities().map((community) => ({
         ...community,
         address: communityAddress(community, _req),
         remote: false,
       }));
-      res.json({ communities: [...local, ...remote.communities], unavailable: remote.unavailable });
+      res.json({ communities: [...local, ...remote.communities.map((community) => ({ ...community, membership_status: memberships.get(community.address) || "" }))], unavailable: remote.unavailable });
     } catch (error) {
       next(error);
     }
@@ -1037,7 +1127,7 @@ export function createApp() {
   );
   app.get("/api/v1/guilds/:id/members", requireUser, (req, res) =>
     isGuildMember(req.params.id, req.user.id)
-      ? res.json({ members: listGuildMembers(req.params.id).map((member) => ({ ...member, roles: listUserGuildRoles(req.params.id, member.id) })) })
+      ? res.json({ members: listGuildMembers(req.params.id).map((member) => ({ ...member, roles: member.remote ? member.roles : listUserGuildRoles(req.params.id, member.id) })) })
       : res.status(403).json({ error: "Join this community first" }),
   );
   app.get("/api/v1/guilds/:id/roles", requireUser, (req, res) =>
@@ -1121,6 +1211,19 @@ export function createApp() {
         ? res.status(204).end()
         : res.status(400).json({ error: "The community owner cannot be removed" }),
   );
+  app.get("/api/v1/guilds/:id/bans", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES), (req, res) =>
+    res.json({ bans: listGuildBans(req.params.id) }));
+  app.post("/api/v1/guilds/:id/bans", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES), (req, res) => {
+    const actor = String(req.body?.actor || "").trim().slice(0, 300);
+    if (!actor || !actor.includes("#")) return res.status(400).json({ error: "Use a portable actor ID such as user-id#instance.example" });
+    const localSuffix = `#${federationDomain()}`;
+    if (actor.endsWith(localSuffix)) removeGuildMember(req.params.id, actor.slice(0, -localSuffix.length));
+    return res.status(201).json({ ban: banGuildActor(req.params.id, actor, String(req.body?.reason || "").slice(0, 500), req.user.id) });
+  });
+  app.delete("/api/v1/guilds/:id/bans/:actor", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES), (req, res) =>
+    unbanGuildActor(req.params.id, req.params.actor, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Ban not found" }));
+  app.get("/api/v1/guilds/:id/moderation-actions", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES), (req, res) =>
+    res.json({ actions: listModerationActions(req.params.id) }));
   app.get(
     "/api/v1/guilds/:id/permission-overrides",
     requireUser,
@@ -1310,7 +1413,7 @@ export function createApp() {
 
   const communityAddress = (community, req) => `${String(community.name || community.id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}#${process.env.FEDERATION_DOMAIN || req.get("host")}`;
   app.get("/api/communities", requireUser, (req, res) =>
-    res.json(listCommunities(req.user.id).map((community) => ({ ...community, address: communityAddress(community, req) }))),
+    res.json([...listCommunities(req.user.id).map((community) => ({ ...community, address: communityAddress(community, req) })), ...remoteGuildsFor(req.user.id)]),
   );
   app.get("/api/v1/friends", requireUser, (req, res) => res.json({ friends: listFriends(req.user.id), requests: listFriendRequests(req.user.id) }));
   app.post("/api/v1/friends/request", requireUser, (req, res) => {
@@ -1334,7 +1437,72 @@ export function createApp() {
   app.put("/api/v1/crypto/key", requireUser, (req, res) => {
     const publicKey = String(req.body?.publicKey || "");
     if (!publicKey || publicKey.length > 10000) return res.status(400).json({ error: "Invalid public key" });
-    res.json({ publicKey: setDmPublicKey(req.user.id, publicKey) });
+    const saved = setDmPublicKey(req.user.id, publicKey), fingerprint = createHash("sha256").update(saved).digest("base64url");
+    for (const peer of listPeers().filter((item) => item.status === "allowed"))
+      void queueFederationEvent({ peer, type: "dm.key.upsert", entityId: `${req.user.id}#${federationDomain()}:dm-key`,
+        payload: { global_user_id: `${req.user.id}#${federationDomain()}`, key_id: `identity:${fingerprint.slice(0, 24)}`, public_key: saved } }).catch(() => {});
+    res.json({ publicKey: saved, keyId: `identity:${fingerprint.slice(0, 24)}`, fingerprint });
+  });
+  app.get("/api/v1/crypto/federated-key", requireUser, (req, res) => {
+    const globalUserId = String(req.query.user || ""), keyId = String(req.query.keyId || "");
+    const identity = findRemoteIdentity(globalUserId), key = keyId ? findFederatedDmKey(globalUserId, keyId) : null;
+    if (!identity && !key) return res.status(404).json({ error: "Remote identity key not found" });
+    const publicKey = key?.public_key || identity.public_key;
+    const fingerprint = key?.fingerprint || (publicKey ? createHash("sha256").update(publicKey).digest("base64url") : "");
+    return res.json({ global_user_id: globalUserId, key_id: key?.key_id || `identity:${fingerprint.slice(0, 24)}`,
+      public_key: publicKey, fingerprint, verification_status: key?.verification_status || "unverified" });
+  });
+  app.put("/api/v1/crypto/federated-key/verify", requireUser, (req, res) => {
+    const key = verifyDmKey(String(req.body?.globalUserId || ""), String(req.body?.keyId || ""),
+      String(req.body?.fingerprint || ""), req.user.id);
+    return key ? res.json({ key }) : res.status(409).json({ error: "The fingerprint does not match the stored key" });
+  });
+  app.get("/api/v1/federation/dms", requireUser, (req, res) => {
+    const other = String(req.query.with || ""), me = `${req.user.id}#${federationDomain()}`;
+    return other ? res.json({ messages: listFederatedDms(me, other) }) : res.status(400).json({ error: "A remote user handle is required" });
+  });
+  app.post("/api/v1/federation/dms", requireUser, async (req, res) => {
+    const recipient = String(req.body?.recipient || ""), separator = recipient.lastIndexOf("#"), ciphertext = String(req.body?.ciphertext || "");
+    if (separator < 1 || !ciphertext || ciphertext.length > 256_000) return res.status(400).json({ error: "Recipient and ciphertext are required" });
+    const destination = recipient.slice(separator + 1).toLowerCase(), sender = `${req.user.id}#${federationDomain()}`;
+    const message = { message_id: randomUUID(), sender_global_id: sender, recipient_global_id: recipient,
+      ciphertext, algorithm: String(req.body?.algorithm || "xchacha20-poly1305").slice(0, 64),
+      sender_key_id: String(req.body?.senderKeyId || "").slice(0, 128), recipient_key_id: String(req.body?.recipientKeyId || "").slice(0, 128),
+      created_at: new Date().toISOString() };
+    if (!message.sender_key_id || !message.recipient_key_id) return res.status(400).json({ error: "Both encryption key IDs are required" });
+    try {
+      const event = await queueFederationEvent({ destination, type: "dm.encrypted", entityId: message.message_id, payload: message });
+      return res.status(202).json({ message: { ...message, event_id: event.event_id } });
+    } catch (error) { return res.status(400).json({ error: error.message }); }
+  });
+  app.post("/api/v1/identity/migrations", requireUser, (req, res) => {
+    const targetDomain = String(req.body?.targetDomain || "").trim().toLowerCase();
+    if (!findPeerByDomain(targetDomain)) return res.status(400).json({ error: "Migration target must be an allowed peer" });
+    return res.status(201).json(createMigrationBundle(req.user, targetDomain));
+  });
+  app.post("/api/v1/identity/migrations/import", requireUser, async (req, res) => {
+    try {
+      const supplied = req.body?.bundle, origin = String(supplied?.origin || ""), peer = findPeerByDomain(origin);
+      if (!peer || !req.body?.secret || !supplied?.payload?.migration_id) throw new Error("A valid peer bundle and claim secret are required");
+      const claimResponse = await federationFetch(peer, `/api/v1/federation/migrations/${encodeURIComponent(supplied.payload.migration_id)}/claim`, {
+        method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ secret: req.body.secret }),
+      });
+      if (!claimResponse.ok) throw new Error("The source instance rejected the migration claim");
+      const claimed = (await claimResponse.json()).bundle;
+      if (canonicalJson(claimed) !== canonicalJson(supplied)) throw new Error("Migration bundle changed during claim");
+      await verifyEnvelope(claimed, { consumeRate: false });
+      const p = claimed.payload.identity;
+      saveRemoteIdentity({ globalId: claimed.payload.source_global_id, origin, remoteUserId: p.id, username: p.username,
+        displayName: p.display_name, avatarUrl: p.avatar_url, bannerUrl: p.banner_url, publicKey: p.dm_public_key,
+        keyFingerprint: p.dm_public_key ? createHash("sha256").update(p.dm_public_key).digest("base64url") : "", profile: { migrated_to: req.user.id }, verifiedAt: new Date().toISOString() });
+      const current = findPublicUser(req.user.id);
+      const migratedUser = updateProfile(req.user.id, { username: current.username, displayName: p.display_name || current.display_name,
+        avatarUrl: imageUrl(p.avatar_url) ?? current.avatar_url, bannerUrl: imageUrl(p.banner_url) ?? current.banner_url,
+        bio: String(p.bio || "").slice(0, 500), accentColor: /^#[0-9a-f]{6}$/i.test(p.accent_color) ? p.accent_color : current.accent_color,
+        profileCss: current.profile_css || "", settings: typeof current.settings === "string" ? JSON.parse(current.settings || "{}") : current.settings || {} });
+      return res.json({ migrated_identity: claimed.payload.source_global_id, linked_local_user_id: req.user.id,
+        community_memberships: claimed.payload.community_memberships || [], user: publicUser(migratedUser) });
+    } catch (error) { return res.status(400).json({ error: error.message }); }
   });
   app.post("/api/v1/dms/:userId", requireUser, (req, res) => {
     const target = findPublicUser(req.params.userId), body = String(req.body?.body || "").trim().slice(0, 4000);
@@ -1466,11 +1634,25 @@ export function createApp() {
     const peer = listPeers().find((item) => item.id === req.params.id);
     if (!peer) return res.status(404).json({ error: "Instance not found" });
     try {
-      return res.json(await checkFederationPeer(peer));
+      const [health, discovery] = await Promise.all([checkFederationPeer(peer), discoverFederationPeer(peer)]);
+      return res.json({ ...health, federation: { domain: discovery.domain, signing_key: discovery.signing_key, capabilities: discovery.capabilities || [] } });
     } catch (error) {
       return res.status(502).json({ error: error.message });
     }
   });
+  app.get("/api/admin/federation-policies", requireAdmin, (_req, res) => res.json({ peers: listPeerPolicies() }));
+  app.put("/api/admin/federation-policies/:peerId", requireAdmin, (req, res) => {
+    if (!listPeers().some((peer) => peer.id === req.params.peerId)) return res.status(404).json({ error: "Peer not found" });
+    return res.json({ policy: savePeerPolicy(req.params.peerId, req.body || {}) });
+  });
+  app.post("/api/v1/federation/abuse-reports", requireUser, (req, res) => {
+    const category = String(req.body?.category || "").trim().slice(0, 80);
+    if (!category) return res.status(400).json({ error: "An abuse category is required" });
+    return res.status(201).json({ report: createAbuseReport({ reporterUserId: req.user.id,
+      peerId: String(req.body?.peerId || "") || null, remoteActor: String(req.body?.remoteActor || "").slice(0, 300),
+      category, evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {} }) });
+  });
+  app.get("/api/admin/federation-abuse-reports", requireAdmin, (_req, res) => res.json({ reports: listAbuseReports() }));
   app.get("/.well-known/libracord", (req, res) => {
     const forwardedProto = String(req.get("x-forwarded-proto") || "").split(",")[0].trim();
     const forwardedHost = String(req.get("x-forwarded-host") || "").split(",")[0].trim();
@@ -1479,8 +1661,11 @@ export function createApp() {
     return res.json({
       protocol: "libracord",
       version: "1.0",
+      domain: federationDomain(),
       instance: publicOrigin,
       api: `${publicOrigin}/api/v1`,
+      inbox: `${publicOrigin}/api/v1/federation/inbox`,
+      signing_key: publicFederationIdentity(),
       capabilities: [
         "discovery",
         "guilds",
@@ -1489,6 +1674,12 @@ export function createApp() {
         "uuid-assets",
         "asset-proxy",
         "community-directory",
+        "signed-events",
+        "durable-remote-membership",
+        "event-reconciliation",
+        "portable-identity",
+        "encrypted-federated-dm",
+        "peer-trust-policy",
       ],
     });
   });

@@ -1,10 +1,10 @@
 # Federation
 
-LibraCord federation is an early public-discovery layer, not yet a complete distributed chat protocol.
+LibraCord uses its own versioned server-to-server protocol. It is not Discord or Matrix federation. The current implementation is suitable for controlled alpha deployments between explicitly allowed peers; it has not had an independent security audit.
 
-## Instance identity
+## Instance setup
 
-Every public instance needs:
+Every public instance needs a stable HTTPS origin and federation domain:
 
 ```dotenv
 PUBLIC_URL=https://chat.example.com
@@ -12,50 +12,94 @@ FEDERATION_DOMAIN=chat.example.com
 ALLOW_PRIVATE_FEDERATION=false
 ```
 
-`PUBLIC_URL` is the canonical origin. `FEDERATION_DOMAIN` is the hostname used in human-readable identifiers, such as `user@chat.example.com` and community references resembling `woof#chat.example.com`.
+Add the other instance under **Administration → Federation**, then set it to `allowed` on both servers. An allowlisted peer is an explicit trust relationship, not merely a directory subscription.
 
-The discovery document is available at:
+Discovery is published at `GET /.well-known/libracord`. It includes the canonical domain, inbox URL, capabilities, and the instance Ed25519 public key. The private key is generated once and stored in the SQLite `federation_identity` table. Back up the database: losing it changes the instance identity.
 
-```text
-GET /.well-known/libracord
+## Signed event envelope
+
+Federation mutations are canonical-JSON envelopes signed with Ed25519:
+
+```json
+{
+  "protocol": "libracord-federation",
+  "version": "1.0",
+  "event_id": "4b52bfaf-203a-4384-a30b-31e35acb981f",
+  "origin": "one.example",
+  "destination": "two.example",
+  "type": "community.snapshot",
+  "entity_id": "community-id#one.example",
+  "sequence": 12,
+  "occurred_at": "2026-09-07T12:00:00.000Z",
+  "expires_at": "2026-09-08T12:00:00.000Z",
+  "key_id": "ed25519:…",
+  "payload": {},
+  "signature": "…"
+}
 ```
 
-It reports instance metadata and public capabilities using proxy-aware HTTPS URLs.
+The signature covers every property except `signature`, with object keys recursively sorted. Receivers check protocol/version, required fields, destination, timestamps, peer allowlist, peer rate policy, discovered key identity, and signature before applying anything.
 
-## What works today
+`event_id` is a unique database key. A retry of an already stored event returns success without applying it twice. Events outside their validity window are rejected. The inbox is `POST /api/v1/federation/inbox`.
 
-- Administrators can configure federation peers as pending, allowed, or blocked.
-- Peer checks validate discovery and report basic health/latency information.
-- Authenticated users can aggregate bounded public home feeds from allowed peers.
-- Community discovery combines local entries with allowed-peer public catalogs.
-- Public assets can be fetched through an allowlisted peer and cached locally.
-- Remote fetches reject redirects/private network targets by default, enforce upload limits, validate MIME data, and use timeouts.
+## Authority and conflict resolution
 
-`ALLOW_PRIVATE_FEDERATION=true` exists for local testing only. Do not enable it on a public server because it weakens SSRF protection.
+- A user's home instance owns that portable identity and published DM key.
+- A community's origin owns its channels, roles, permissions, memberships, bans, and moderation log.
+- Replicated objects are stored in `remote_*` tables and cannot overwrite local authoritative tables.
+- Each origin/entity pair has a monotonic sequence head. A larger sequence wins. Equal sequences are resolved deterministically by timestamp, then event ID.
+- Successful community mutations publish a complete authoritative snapshot to peers that currently have joined remote members. This lets a receiver converge atomically after role, channel, permission, ban, or moderation changes.
 
-## What is not complete
+Fine-grained event names (`role.upsert`, `permission.upsert`, `ban.upsert`, and `moderation.action`) are accepted when they carry an authoritative snapshot. The snapshot is the convergence boundary in protocol 1.0.
 
-- Joining a remote community as a durable remote member
-- Signed server-to-server event delivery
-- Replay protection and idempotent event IDs
-- Cross-instance role, permission, ban, and moderation replication
-- Conflict resolution and offline event reconciliation
-- Portable identity and account migration
-- Encrypted cross-instance direct messages and key verification
-- Trust scoring, abuse reporting, and peer-level rate policy
+## Durable remote membership
 
-Do not promise Discord-compatible or Matrix-compatible federation; LibraCord currently defines its own minimal endpoints.
+Join with the authenticated endpoint:
 
-## Protocol direction
+```http
+POST /api/v1/federation/memberships
+Content-Type: application/json
 
-A production protocol should add:
+{ "address": "woof#chat.example.com" }
+```
 
-1. Stable globally scoped IDs for users, communities, channels, and events.
-2. Ed25519 instance keys published through discovery with rotation metadata.
-3. Canonical JSON signing over origin, destination, event ID, timestamp, and body digest.
-4. Authenticated server inbox/outbox delivery with replay windows and idempotency.
-5. Explicit authority rules: the home instance owns identity; the community origin owns membership and moderation state.
-6. Versioned capability negotiation and schema migrations.
-7. Per-peer queues, retry/backoff, rate limiting, audit logs, and quarantine.
+The local server resolves the friendly address to the remote stable community ID, caches its state, writes a `pending` membership, and queues a signed `membership.join.request`. The community origin persists the remote identity and membership, then returns a signed `membership.upsert` with the current snapshot. The membership survives browser refreshes and instance restarts.
 
-Until those rules are implemented, keep private content and authorization decisions local to the originating instance.
+Use `GET /api/v1/federation/memberships` to inspect remote memberships. Joined and pending remote communities are also included in the ordinary community lists.
+
+## Offline delivery and reconciliation
+
+Outbound events are written to `federation_events` and `federation_outbox` before network delivery. Failed requests retry with exponential backoff (up to one hour); a server restart does not lose the queue.
+
+For recovery after an extended outage, send a signed `sync.request` envelope to `POST /api/v1/federation/sync` with an ISO timestamp in `payload.after` and a limit up to 500. The response contains only signed outbound events addressed to the requesting origin and returns a timestamp cursor. Apply returned envelopes through the same verified/idempotent event processor used by the inbox.
+
+## Portable identity migration
+
+An authenticated user creates a short-lived, signed migration bundle with `POST /api/v1/identity/migrations` and `{ "targetDomain": "new.example" }`. The response includes a one-use 256-bit claim secret and signed bundle valid for 30 minutes. On the target instance, while authenticated as the destination account, submit both to `POST /api/v1/identity/migrations/import`.
+
+The target asks the source to consume the claim, verifies the source signature, then links the portable source identity to the local account. Passwords, sessions, private encryption keys, and message plaintext are never exported. Protocol 1.0 creates a verified identity link; it does not silently take over the target account or copy private history.
+
+## Encrypted cross-instance DMs
+
+The federation server transports ciphertext only. Clients publish an encryption public key with `PUT /api/v1/crypto/key`; the server federates it as `dm.key.upsert`. Remote key lookup and explicit fingerprint verification use:
+
+- `GET /api/v1/crypto/federated-key?user=<global-id>&keyId=<key-id>`
+- `PUT /api/v1/crypto/federated-key/verify`
+
+Send opaque encrypted payloads with `POST /api/v1/federation/dms`; read locally stored ciphertext with `GET /api/v1/federation/dms?with=<global-id>`. Both sender and recipient key IDs are mandatory. Incoming ciphertext is delivered live as the Socket.IO `dm:encrypted` event.
+
+The server does not decrypt these messages. Correct encryption, authenticated associated data, device key storage, rotation, and safety-number UX are client responsibilities. This is an encrypted transport primitive, not yet a formally audited Signal-style multi-device protocol.
+
+## Trust, abuse, and rate policy
+
+Each peer has a persistent trust score (0–100), state (`trusted`, `normal`, `restricted`, or `blocked`), per-minute request limit, and burst allowance. Valid signed traffic and successful deliveries raise trust slowly; signature/delivery failures lower it. A policy marked `blocked` rejects inbound events even if the peer itself remains allowlisted.
+
+Administrators manage these at `GET /api/admin/federation-policies` and `PUT /api/admin/federation-policies/:peerId`. Users submit structured reports to `POST /api/v1/federation/abuse-reports`; administrators inspect them at `GET /api/admin/federation-abuse-reports`. Reports do not automatically ban a peer. Human review is required.
+
+## Operations and key rotation
+
+- Back up the database and uploads together.
+- Keep clocks synchronized; events more than five minutes in the future are rejected.
+- Never enable `ALLOW_PRIVATE_FEDERATION=true` on a public deployment.
+- Watch failed outbox attempts and declining peer trust.
+- Current discovery detects a changed key ID, but formal cross-signed key rotation is not implemented. Coordinate rotation out of band and verify fingerprints before trusting a replacement.

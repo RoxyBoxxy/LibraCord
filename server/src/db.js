@@ -31,7 +31,30 @@ db.exec(`
  CREATE TABLE IF NOT EXISTS published_items(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('theme','decoration','profile-theme')),name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS user_collections(user_id TEXT NOT NULL,item_id TEXT NOT NULL,added_at TEXT NOT NULL,PRIMARY KEY(user_id,item_id),FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS friend_requests(id TEXT PRIMARY KEY,from_user TEXT NOT NULL,to_user TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,UNIQUE(from_user,to_user),FOREIGN KEY(from_user) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(to_user) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS federation_identity(id INTEGER PRIMARY KEY CHECK(id=1),key_id TEXT NOT NULL,public_key TEXT NOT NULL,private_key TEXT NOT NULL,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS federation_events(event_id TEXT PRIMARY KEY,direction TEXT NOT NULL,origin TEXT NOT NULL,destination TEXT NOT NULL,type TEXT NOT NULL,entity_id TEXT NOT NULL,sequence INTEGER NOT NULL,envelope TEXT NOT NULL,status TEXT NOT NULL,error TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,processed_at TEXT);
+ CREATE INDEX IF NOT EXISTS federation_events_origin_created ON federation_events(origin,created_at);
+ CREATE TABLE IF NOT EXISTS federation_outbox(event_id TEXT NOT NULL,peer_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'pending',attempts INTEGER NOT NULL DEFAULT 0,next_attempt_at TEXT NOT NULL,last_error TEXT NOT NULL DEFAULT '',delivered_at TEXT,PRIMARY KEY(event_id,peer_id),FOREIGN KEY(event_id) REFERENCES federation_events(event_id) ON DELETE CASCADE,FOREIGN KEY(peer_id) REFERENCES federation_peers(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS federation_entity_heads(origin TEXT NOT NULL,entity_id TEXT NOT NULL,sequence INTEGER NOT NULL,event_id TEXT NOT NULL,occurred_at TEXT NOT NULL,PRIMARY KEY(origin,entity_id));
+ CREATE TABLE IF NOT EXISTS remote_identities(global_id TEXT PRIMARY KEY,origin TEXT NOT NULL,remote_user_id TEXT NOT NULL,username TEXT NOT NULL,display_name TEXT NOT NULL,avatar_url TEXT NOT NULL DEFAULT '',banner_url TEXT NOT NULL DEFAULT '',public_key TEXT NOT NULL DEFAULT '',key_fingerprint TEXT NOT NULL DEFAULT '',profile TEXT NOT NULL DEFAULT '{}',verified_at TEXT,updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS remote_communities(global_id TEXT PRIMARY KEY,origin TEXT NOT NULL,remote_id TEXT NOT NULL,address TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',icon_url TEXT NOT NULL DEFAULT '',banner_url TEXT NOT NULL DEFAULT '',revision INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL DEFAULT '{}',updated_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS remote_memberships(community_global_id TEXT NOT NULL,user_global_id TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','joined','left','banned')),roles TEXT NOT NULL DEFAULT '[]',joined_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(community_global_id,user_global_id));
+ CREATE TABLE IF NOT EXISTS federated_dm_keys(global_user_id TEXT NOT NULL,key_id TEXT NOT NULL,public_key TEXT NOT NULL,fingerprint TEXT NOT NULL,verification_status TEXT NOT NULL DEFAULT 'unverified',verified_by TEXT,verified_at TEXT,updated_at TEXT NOT NULL,PRIMARY KEY(global_user_id,key_id));
+ CREATE TABLE IF NOT EXISTS federated_direct_messages(message_id TEXT PRIMARY KEY,event_id TEXT NOT NULL UNIQUE,sender_global_id TEXT NOT NULL,recipient_global_id TEXT NOT NULL,ciphertext TEXT NOT NULL,algorithm TEXT NOT NULL,sender_key_id TEXT NOT NULL,recipient_key_id TEXT NOT NULL,created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS federation_peer_policy(peer_id TEXT PRIMARY KEY,trust_score INTEGER NOT NULL DEFAULT 50,state TEXT NOT NULL DEFAULT 'normal',requests_per_minute INTEGER NOT NULL DEFAULT 120,burst INTEGER NOT NULL DEFAULT 30,window_started_at TEXT,count INTEGER NOT NULL DEFAULT 0,last_success_at TEXT,last_failure_at TEXT,failure_count INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(peer_id) REFERENCES federation_peers(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS federation_abuse_reports(id TEXT PRIMARY KEY,reporter_user_id TEXT NOT NULL,peer_id TEXT,remote_actor TEXT NOT NULL DEFAULT '',category TEXT NOT NULL,evidence TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'open',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(reporter_user_id) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS identity_migrations(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_global_id TEXT NOT NULL,target_domain TEXT NOT NULL,bundle TEXT NOT NULL,secret_hash TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'created',expires_at TEXT NOT NULL,created_at TEXT NOT NULL,completed_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS guild_bans(guild_id TEXT NOT NULL,actor_global_id TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',moderator_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(guild_id,actor_global_id));
+ CREATE TABLE IF NOT EXISTS moderation_actions(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,action TEXT NOT NULL,target_global_id TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',moderator_id TEXT NOT NULL,metadata TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL);
 `);
+for (const [name, definition] of [
+  ["federation_domain", "TEXT NOT NULL DEFAULT ''"],
+  ["signing_key_id", "TEXT NOT NULL DEFAULT ''"],
+  ["signing_public_key", "TEXT NOT NULL DEFAULT ''"],
+]) {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('federation_peers') WHERE name=?").get(name))
+    db.exec(`ALTER TABLE federation_peers ADD COLUMN ${name} ${definition}`);
+}
 for (const [name, definition] of [["attachments", "TEXT NOT NULL DEFAULT '[]'"], ["content_warning", "TEXT NOT NULL DEFAULT ''"], ["reply_to", "INTEGER"]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
@@ -401,7 +424,7 @@ export function listPeers() {
 }
 export function createPeer({ id, name, baseUrl, status }) {
   const now = new Date().toISOString();
-  db.prepare("INSERT INTO federation_peers VALUES(?,?,?,?,?,?)").run(
+  db.prepare("INSERT INTO federation_peers(id,name,base_url,status,created_at,updated_at) VALUES(?,?,?,?,?,?)").run(
     id,
     name,
     baseUrl,
@@ -467,6 +490,13 @@ export function updateCommunity(
 }
 export function findCommunity(id) {
   return db.prepare("SELECT * FROM communities WHERE id=?").get(id);
+}
+export function findCommunityByReference(reference) {
+  const wanted = String(reference || "");
+  const direct = findCommunity(wanted);
+  if (direct) return direct;
+  const slug = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return db.prepare("SELECT * FROM communities").all().find((community) => slug(community.name) === slug(wanted));
 }
 export function listCommunityChannels(communityId) {
   return db.prepare("SELECT * FROM channels WHERE community_id=? ORDER BY name").all(communityId);
@@ -549,7 +579,7 @@ export function initializeGuildAccess(guildId, userId, roleId) {
   );
 }
 export function listGuildMembers(guildId) {
-  return db
+  const local = db
     .prepare(
       `SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,u.role,
        COALESCE(json_extract(u.settings,'$.status'),'online') AS presence_status,
@@ -561,10 +591,22 @@ export function listGuildMembers(guildId) {
        WHERE m.guild_id=? ORDER BY COALESCE(m.nickname,u.display_name)`,
     )
     .all(guildId);
+  const globalCommunityId = `${guildId}#${federationDomainForDb()}`;
+  const rolesById = new Map(listGuildRoles(guildId).map((role) => [role.id, role]));
+  const remote = db.prepare(`SELECT i.global_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,
+    COALESCE(json_extract(i.profile,'$.accent_color'),'#62efc6') AS accent_color,'remote' AS role,
+    'online' AS presence_status,'' AS status_text,'' AS decoration_id,'' AS profile_theme_id,'[]' AS username_style_ids,
+    NULL AS nickname,m.joined_at,m.roles FROM remote_memberships m JOIN remote_identities i ON i.global_id=m.user_global_id
+    WHERE m.community_global_id=? AND m.status='joined' ORDER BY i.display_name`).all(globalCommunityId)
+    .map((member) => ({ ...member, remote: true, roles: JSON.parse(member.roles || "[]").map((id) => rolesById.get(id)).filter(Boolean) }));
+  return [...local, ...remote];
 }
 export function removeGuildMember(guildId, userId) {
   const guild = findCommunity(guildId);
   if (!guild || guild.owner_id === userId) return false;
+  if (String(userId).includes("#"))
+    return db.prepare("DELETE FROM remote_memberships WHERE community_global_id=? AND user_global_id=?")
+      .run(`${guildId}#${federationDomainForDb()}`, userId).changes > 0;
   db.prepare("DELETE FROM member_roles WHERE guild_id=? AND user_id=?").run(guildId, userId);
   return db.prepare("DELETE FROM guild_members WHERE guild_id=? AND user_id=?").run(guildId, userId).changes > 0;
 }
@@ -824,6 +866,13 @@ export function savePermissionOverride(value) {
     .get(value.id);
 }
 export function setMemberRoles(guildId, userId, roleIds) {
+  if (String(userId).includes("#")) {
+    const communityGlobalId = `${guildId}#${federationDomainForDb()}`;
+    const member = db.prepare("SELECT status FROM remote_memberships WHERE community_global_id=? AND user_global_id=?").get(communityGlobalId, userId);
+    if (!member) throw new Error("Remote member not found");
+    saveRemoteMembership(communityGlobalId, userId, member.status, roleIds);
+    return roleIds;
+  }
   db.prepare("DELETE FROM member_roles WHERE guild_id=? AND user_id=?").run(
     guildId,
     userId,
@@ -1165,4 +1214,263 @@ export function createDirectMessage(senderId, recipientId, body) {
   const createdAt = new Date().toISOString();
   const result = db.prepare("INSERT INTO direct_messages(sender_id,recipient_id,body,created_at) VALUES(?,?,?,?)").run(senderId, recipientId, body, createdAt);
   return db.prepare(`SELECT m.*,u.display_name AS author_name,u.username,u.avatar_url FROM direct_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?`).get(result.lastInsertRowid);
+}
+
+// Federation persistence deliberately exposes protocol-shaped operations rather
+// than the database handle. Remote objects never share tables with authoritative
+// local objects, which prevents a peer from overwriting local state.
+export function getFederationIdentityRecord() {
+  return db.prepare("SELECT * FROM federation_identity WHERE id=1").get();
+}
+export function saveFederationIdentityRecord({ keyId, publicKey, privateKey }) {
+  db.prepare("INSERT OR REPLACE INTO federation_identity(id,key_id,public_key,private_key,created_at) VALUES(1,?,?,?,?)")
+    .run(keyId, publicKey, privateKey, new Date().toISOString());
+  return getFederationIdentityRecord();
+}
+export function findPeerByDomain(domain) {
+  const wanted = String(domain || "").toLowerCase();
+  return listPeers().find((peer) => {
+    try { return (peer.federation_domain || new URL(peer.base_url).host).toLowerCase() === wanted; }
+    catch { return false; }
+  });
+}
+export function cachePeerSigningIdentity(peerId, domain, keyId, publicKey) {
+  db.prepare("UPDATE federation_peers SET federation_domain=?,signing_key_id=?,signing_public_key=?,updated_at=? WHERE id=?")
+    .run(domain, keyId, publicKey, new Date().toISOString(), peerId);
+}
+export function getFederationEvent(eventId) {
+  return db.prepare("SELECT * FROM federation_events WHERE event_id=?").get(eventId);
+}
+export function saveFederationEvent(envelope, direction, status = "stored", error = "") {
+  const result = db.prepare(`INSERT OR IGNORE INTO federation_events
+    (event_id,direction,origin,destination,type,entity_id,sequence,envelope,status,error,created_at,processed_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      envelope.event_id, direction, envelope.origin, envelope.destination,
+      envelope.type, envelope.entity_id, envelope.sequence,
+      JSON.stringify(envelope), status, error, envelope.occurred_at,
+      status === "processed" ? new Date().toISOString() : null,
+    );
+  return result.changes > 0;
+}
+export function markFederationEvent(eventId, status, error = "") {
+  db.prepare("UPDATE federation_events SET status=?,error=?,processed_at=? WHERE event_id=?")
+    .run(status, String(error || "").slice(0, 1000), new Date().toISOString(), eventId);
+}
+export function nextFederationSequence(origin, entityId) {
+  const row = db.prepare("SELECT sequence FROM federation_entity_heads WHERE origin=? AND entity_id=?").get(origin, entityId);
+  return Number(row?.sequence || 0) + 1;
+}
+export function acceptFederationHead(envelope) {
+  const current = db.prepare("SELECT * FROM federation_entity_heads WHERE origin=? AND entity_id=?").get(envelope.origin, envelope.entity_id);
+  const wins = !current || envelope.sequence > current.sequence ||
+    (envelope.sequence === current.sequence && (envelope.occurred_at > current.occurred_at ||
+      (envelope.occurred_at === current.occurred_at && envelope.event_id > current.event_id)));
+  if (!wins) return false;
+  db.prepare(`INSERT INTO federation_entity_heads(origin,entity_id,sequence,event_id,occurred_at) VALUES(?,?,?,?,?)
+    ON CONFLICT(origin,entity_id) DO UPDATE SET sequence=excluded.sequence,event_id=excluded.event_id,occurred_at=excluded.occurred_at`)
+    .run(envelope.origin, envelope.entity_id, envelope.sequence, envelope.event_id, envelope.occurred_at);
+  return true;
+}
+export function queueFederationOutbox(eventId, peerId, when = new Date().toISOString()) {
+  db.prepare("INSERT OR IGNORE INTO federation_outbox(event_id,peer_id,next_attempt_at) VALUES(?,?,?)").run(eventId, peerId, when);
+}
+export function listDueFederationOutbox(limit = 50) {
+  return db.prepare(`SELECT o.*,e.envelope,p.base_url,p.status AS peer_status
+    FROM federation_outbox o JOIN federation_events e ON e.event_id=o.event_id
+    JOIN federation_peers p ON p.id=o.peer_id
+    WHERE o.state IN ('pending','failed') AND o.next_attempt_at<=? AND p.status='allowed'
+    ORDER BY o.next_attempt_at LIMIT ?`).all(new Date().toISOString(), Math.min(200, limit));
+}
+export function markFederationDelivery(eventId, peerId, ok, error = "") {
+  if (ok) {
+    db.prepare("UPDATE federation_outbox SET state='delivered',attempts=attempts+1,last_error='',delivered_at=? WHERE event_id=? AND peer_id=?")
+      .run(new Date().toISOString(), eventId, peerId);
+    db.prepare("INSERT OR IGNORE INTO federation_peer_policy(peer_id) VALUES(?)").run(peerId);
+    db.prepare("UPDATE federation_peer_policy SET last_success_at=?,failure_count=0,trust_score=min(100,trust_score+1) WHERE peer_id=?").run(new Date().toISOString(), peerId);
+    return;
+  }
+  const current = db.prepare("SELECT attempts FROM federation_outbox WHERE event_id=? AND peer_id=?").get(eventId, peerId);
+  const attempts = Number(current?.attempts || 0) + 1;
+  const delay = Math.min(3600, 2 ** Math.min(attempts, 10));
+  db.prepare("UPDATE federation_outbox SET state='failed',attempts=?,last_error=?,next_attempt_at=? WHERE event_id=? AND peer_id=?")
+    .run(attempts, String(error).slice(0, 1000), new Date(Date.now() + delay * 1000).toISOString(), eventId, peerId);
+  db.prepare("INSERT OR IGNORE INTO federation_peer_policy(peer_id) VALUES(?)").run(peerId);
+  db.prepare("UPDATE federation_peer_policy SET last_failure_at=?,failure_count=failure_count+1,trust_score=max(0,trust_score-2) WHERE peer_id=?").run(new Date().toISOString(), peerId);
+}
+export function recordPeerVerification(peerId, success) {
+  db.prepare("INSERT OR IGNORE INTO federation_peer_policy(peer_id) VALUES(?)").run(peerId);
+  db.prepare(`UPDATE federation_peer_policy SET trust_score=max(0,min(100,trust_score+?)),
+    last_success_at=CASE WHEN ?=1 THEN ? ELSE last_success_at END,
+    last_failure_at=CASE WHEN ?=0 THEN ? ELSE last_failure_at END,
+    failure_count=CASE WHEN ?=1 THEN 0 ELSE failure_count+1 END WHERE peer_id=?`)
+    .run(success ? 1 : -5, success ? 1 : 0, new Date().toISOString(), success ? 1 : 0, new Date().toISOString(), success ? 1 : 0, peerId);
+}
+export function listFederationEventsForPeer(peerDomain, after = "", limit = 200) {
+  return db.prepare(`SELECT envelope FROM federation_events WHERE direction='outbound' AND destination=?
+    AND created_at>? ORDER BY created_at,event_id LIMIT ?`).all(peerDomain, after || "1970-01-01T00:00:00.000Z", Math.min(500, limit)).map((row) => JSON.parse(row.envelope));
+}
+export function consumePeerRate(peerId) {
+  db.prepare("INSERT OR IGNORE INTO federation_peer_policy(peer_id) VALUES(?)").run(peerId);
+  const policy = db.prepare("SELECT * FROM federation_peer_policy WHERE peer_id=?").get(peerId);
+  if (policy.state === "blocked") return { allowed: false, policy };
+  const now = Date.now(), start = Date.parse(policy.window_started_at || "");
+  const reset = !Number.isFinite(start) || now - start >= 60_000;
+  const count = reset ? 1 : policy.count + 1;
+  db.prepare("UPDATE federation_peer_policy SET window_started_at=?,count=? WHERE peer_id=?")
+    .run(reset ? new Date(now).toISOString() : policy.window_started_at, count, peerId);
+  const multiplier = policy.state === "trusted" ? 2 : policy.state === "restricted" ? 0.25 : 1;
+  const limit = Math.max(1, Math.floor(policy.requests_per_minute * multiplier)) + policy.burst;
+  return { allowed: count <= limit, policy: { ...policy, count, effective_limit: limit } };
+}
+export function listPeerPolicies() {
+  return db.prepare(`SELECT p.id,p.name,p.base_url,p.status,COALESCE(x.trust_score,50) trust_score,
+    COALESCE(x.state,'normal') state,COALESCE(x.requests_per_minute,120) requests_per_minute,
+    COALESCE(x.burst,30) burst,x.last_success_at,x.last_failure_at,COALESCE(x.failure_count,0) failure_count
+    FROM federation_peers p LEFT JOIN federation_peer_policy x ON x.peer_id=p.id ORDER BY p.name`).all();
+}
+export function savePeerPolicy(peerId, input) {
+  db.prepare(`INSERT INTO federation_peer_policy(peer_id,trust_score,state,requests_per_minute,burst)
+    VALUES(?,?,?,?,?) ON CONFLICT(peer_id) DO UPDATE SET trust_score=excluded.trust_score,state=excluded.state,
+    requests_per_minute=excluded.requests_per_minute,burst=excluded.burst`).run(
+      peerId, Math.max(0, Math.min(100, Number(input.trustScore) || 0)),
+      ["trusted","normal","restricted","blocked"].includes(input.state) ? input.state : "normal",
+      Math.max(1, Math.min(10000, Number(input.requestsPerMinute) || 120)),
+      Math.max(0, Math.min(1000, Number(input.burst) || 30)),
+    );
+  return listPeerPolicies().find((item) => item.id === peerId);
+}
+export function saveRemoteIdentity(identity) {
+  db.prepare(`INSERT INTO remote_identities(global_id,origin,remote_user_id,username,display_name,avatar_url,banner_url,public_key,key_fingerprint,profile,verified_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(global_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,
+    avatar_url=excluded.avatar_url,banner_url=excluded.banner_url,public_key=excluded.public_key,key_fingerprint=excluded.key_fingerprint,
+    profile=excluded.profile,verified_at=excluded.verified_at,updated_at=excluded.updated_at`).run(
+      identity.globalId, identity.origin, identity.remoteUserId, identity.username, identity.displayName,
+      identity.avatarUrl || "", identity.bannerUrl || "", identity.publicKey || "", identity.keyFingerprint || "",
+      JSON.stringify(identity.profile || {}), identity.verifiedAt || null, new Date().toISOString());
+}
+export function findRemoteIdentity(globalId) {
+  const row = db.prepare("SELECT * FROM remote_identities WHERE global_id=?").get(globalId);
+  return row ? { ...row, profile: JSON.parse(row.profile || "{}") } : null;
+}
+export function saveRemoteCommunity(snapshot, origin, sequence) {
+  const id = snapshot.global_id || `${snapshot.id}#${origin}`;
+  db.prepare(`INSERT INTO remote_communities(global_id,origin,remote_id,address,name,description,icon_url,banner_url,revision,state,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(global_id) DO UPDATE SET address=excluded.address,name=excluded.name,description=excluded.description,
+    icon_url=excluded.icon_url,banner_url=excluded.banner_url,revision=excluded.revision,state=excluded.state,updated_at=excluded.updated_at`).run(
+      id, origin, snapshot.id, snapshot.address || id, snapshot.name, snapshot.description || "", snapshot.icon_url || "",
+      snapshot.banner_url || "", sequence, JSON.stringify(snapshot), new Date().toISOString());
+  for (const member of snapshot.remote_members || []) saveRemoteMembership(id, member.global_id, member.status || "joined", member.roles || []);
+  return findRemoteCommunity(id);
+}
+export function findRemoteCommunity(globalId) {
+  const row = db.prepare("SELECT * FROM remote_communities WHERE global_id=? OR address=?").get(globalId, globalId);
+  return row ? { ...row, state: JSON.parse(row.state || "{}") } : null;
+}
+export function removeRemoteCommunity(globalId) {
+  db.prepare("DELETE FROM remote_memberships WHERE community_global_id=?").run(globalId);
+  return db.prepare("DELETE FROM remote_communities WHERE global_id=?").run(globalId).changes > 0;
+}
+export function listRemoteCommunitiesForUser(globalUserId) {
+  return db.prepare(`SELECT c.*,m.status,m.roles FROM remote_memberships m JOIN remote_communities c ON c.global_id=m.community_global_id
+    WHERE m.user_global_id=? AND m.status IN ('pending','joined') ORDER BY c.name`).all(globalUserId).map((row) => ({ ...row, state: JSON.parse(row.state || "{}"), roles: JSON.parse(row.roles || "[]") }));
+}
+export function saveRemoteMembership(communityGlobalId, userGlobalId, status, roles = []) {
+  const now = new Date().toISOString();
+  db.prepare(`INSERT INTO remote_memberships(community_global_id,user_global_id,status,roles,joined_at,updated_at) VALUES(?,?,?,?,?,?)
+    ON CONFLICT(community_global_id,user_global_id) DO UPDATE SET status=excluded.status,roles=excluded.roles,updated_at=excluded.updated_at`)
+    .run(communityGlobalId, userGlobalId, status, JSON.stringify(roles), status === "joined" ? now : null, now);
+}
+export function communityFederationSnapshot(guildId, domain) {
+  const community = findCommunity(guildId);
+  if (!community) return null;
+  const origin = String(process.env.PUBLIC_URL || `http://${domain}`).replace(/\/$/, "");
+  const asset = (id) => id ? `${origin}/api/v1/assets/${id}` : "";
+  const profile = JSON.parse(community.profile || "{}");
+  if (String(profile.atmosphere?.backgroundUrl || "").startsWith("/"))
+    profile.atmosphere.backgroundUrl = new URL(profile.atmosphere.backgroundUrl, `${origin}/`).href;
+  return {
+    id: community.id, global_id: `${community.id}#${domain}`, address: `${community.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")}#${domain}`,
+    name: community.name, description: community.description, icon_url: asset(community.icon_asset_id), banner_url: asset(community.banner_asset_id),
+    profile, channels: listCommunityChannels(guildId), categories: listCategories(guildId),
+    roles: listGuildRoles(guildId), permission_overrides: listPermissionOverrides(guildId),
+    members: db.prepare("SELECT guild_id,user_id,nickname,joined_at FROM guild_members WHERE guild_id=?").all(guildId),
+    member_roles: db.prepare("SELECT guild_id,user_id,role_id FROM member_roles WHERE guild_id=?").all(guildId),
+    remote_members: db.prepare("SELECT user_global_id AS global_id,status,roles,joined_at FROM remote_memberships WHERE community_global_id=?").all(`${guildId}#${domain}`).map((m) => ({ ...m, roles: JSON.parse(m.roles || "[]") })),
+    bans: db.prepare("SELECT actor_global_id,reason,created_at FROM guild_bans WHERE guild_id=?").all(guildId),
+    moderation_actions: db.prepare("SELECT id,action,target_global_id,reason,metadata,created_at FROM moderation_actions WHERE guild_id=? ORDER BY created_at DESC LIMIT 500").all(guildId).map((a) => ({ ...a, metadata: JSON.parse(a.metadata || "{}") })),
+  };
+}
+export function listPeerDomainsForCommunity(guildId, domain) {
+  const globalId = `${guildId}#${domain}`;
+  return db.prepare("SELECT user_global_id FROM remote_memberships WHERE community_global_id=? AND status='joined'").all(globalId)
+    .map((row) => row.user_global_id.slice(row.user_global_id.lastIndexOf("#") + 1)).filter(Boolean);
+}
+export function listGuildBans(guildId) {
+  return db.prepare("SELECT * FROM guild_bans WHERE guild_id=? ORDER BY created_at DESC").all(guildId);
+}
+export function banGuildActor(guildId, actorGlobalId, reason, moderatorId) {
+  const now = new Date().toISOString();
+  db.prepare("INSERT OR REPLACE INTO guild_bans VALUES(?,?,?,?,?)").run(guildId, actorGlobalId, reason, moderatorId, now);
+  db.prepare("UPDATE remote_memberships SET status='banned',updated_at=? WHERE community_global_id=? AND user_global_id=?")
+    .run(now, `${guildId}#${federationDomainForDb()}`, actorGlobalId);
+  createModerationAction(guildId, "ban", actorGlobalId, reason, moderatorId, {});
+  return db.prepare("SELECT * FROM guild_bans WHERE guild_id=? AND actor_global_id=?").get(guildId, actorGlobalId);
+}
+function federationDomainForDb() {
+  if (process.env.FEDERATION_DOMAIN) return process.env.FEDERATION_DOMAIN.toLowerCase();
+  try { return new URL(process.env.PUBLIC_URL || "http://localhost:3002").host.toLowerCase(); } catch { return "localhost:3002"; }
+}
+export function unbanGuildActor(guildId, actorGlobalId, moderatorId) {
+  const changed = db.prepare("DELETE FROM guild_bans WHERE guild_id=? AND actor_global_id=?").run(guildId, actorGlobalId).changes;
+  if (changed) createModerationAction(guildId, "unban", actorGlobalId, "", moderatorId, {});
+  return changed > 0;
+}
+export function createModerationAction(guildId, action, targetGlobalId, reason, moderatorId, metadata = {}) {
+  const value = { id: randomUUID(), guild_id: guildId, action, target_global_id: targetGlobalId, reason,
+    moderator_id: moderatorId, metadata, created_at: new Date().toISOString() };
+  db.prepare("INSERT INTO moderation_actions VALUES(?,?,?,?,?,?,?)").run(value.id, guildId, action, targetGlobalId, reason,
+    moderatorId, JSON.stringify(metadata), value.created_at);
+  return value;
+}
+export function listModerationActions(guildId) {
+  return db.prepare("SELECT * FROM moderation_actions WHERE guild_id=? ORDER BY created_at DESC LIMIT 500").all(guildId)
+    .map((row) => ({ ...row, metadata: JSON.parse(row.metadata || "{}") }));
+}
+export function saveFederatedDm(message) {
+  db.prepare(`INSERT OR IGNORE INTO federated_direct_messages(message_id,event_id,sender_global_id,recipient_global_id,ciphertext,algorithm,sender_key_id,recipient_key_id,created_at)
+    VALUES(?,?,?,?,?,?,?,?,?)`).run(message.message_id, message.event_id, message.sender_global_id, message.recipient_global_id,
+      message.ciphertext, message.algorithm, message.sender_key_id, message.recipient_key_id, message.created_at);
+}
+export function listFederatedDms(globalUserId, otherGlobalId) {
+  return db.prepare(`SELECT * FROM federated_direct_messages WHERE (sender_global_id=? AND recipient_global_id=?) OR
+    (sender_global_id=? AND recipient_global_id=?) ORDER BY created_at`).all(globalUserId, otherGlobalId, otherGlobalId, globalUserId);
+}
+export function saveFederatedDmKey(value) {
+  db.prepare(`INSERT INTO federated_dm_keys(global_user_id,key_id,public_key,fingerprint,verification_status,verified_by,verified_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(global_user_id,key_id) DO UPDATE SET public_key=excluded.public_key,fingerprint=excluded.fingerprint,
+    verification_status=excluded.verification_status,verified_by=excluded.verified_by,verified_at=excluded.verified_at,updated_at=excluded.updated_at`)
+    .run(value.globalUserId, value.keyId, value.publicKey, value.fingerprint, value.status || "unverified", value.verifiedBy || null,
+      value.status === "verified" ? new Date().toISOString() : null, new Date().toISOString());
+}
+export function findFederatedDmKey(globalUserId, keyId) {
+  return db.prepare("SELECT * FROM federated_dm_keys WHERE global_user_id=? AND key_id=?").get(globalUserId, keyId);
+}
+export function createAbuseReport(value) {
+  const now = new Date().toISOString(), id = randomUUID();
+  db.prepare("INSERT INTO federation_abuse_reports VALUES(?,?,?,?,?,?,?,?)").run(id, value.reporterUserId, value.peerId || null,
+    value.remoteActor || "", value.category, JSON.stringify(value.evidence || {}), "open", now, now);
+  return { id, status: "open", created_at: now };
+}
+export function listAbuseReports() {
+  return db.prepare("SELECT * FROM federation_abuse_reports ORDER BY created_at DESC").all().map((r) => ({ ...r, evidence: JSON.parse(r.evidence || "{}") }));
+}
+export function createIdentityMigration(value) {
+  db.prepare("INSERT INTO identity_migrations VALUES(?,?,?,?,?,?,?,?,?,NULL)").run(value.id, value.userId, value.sourceGlobalId,
+    value.targetDomain, JSON.stringify(value.bundle), value.secretHash, "created", value.expiresAt, value.createdAt);
+}
+export function claimIdentityMigration(id, secretHash) {
+  const row = db.prepare("SELECT * FROM identity_migrations WHERE id=? AND secret_hash=? AND state='created' AND expires_at>?").get(id, secretHash, new Date().toISOString());
+  if (!row) return null;
+  db.prepare("UPDATE identity_migrations SET state='claimed',completed_at=? WHERE id=?").run(new Date().toISOString(), id);
+  return { ...row, bundle: JSON.parse(row.bundle) };
 }

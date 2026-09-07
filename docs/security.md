@@ -19,7 +19,7 @@ Production requirements:
 
 - HTTPS only, including a valid certificate for Electron clients
 - a restricted `CLIENT_ORIGIN`
-- rate limits for registration, login, messages, uploads, invites, and federation
+- rate limits for registration, login, messages, uploads, and invites (federation has a persistent per-peer limiter)
 - session revocation and device/session management
 - password-reset and email-verification flows before general public registration
 - secure proxy headers and clock synchronization
@@ -38,9 +38,17 @@ Federated asset fetches are limited to explicitly allowed peers and include prot
 
 ## Direct-message encryption
 
-The client contains key exchange/encryption helpers and the server stores opaque DM bodies. This design is experimental. It does not yet establish an audited end-to-end security claim because identity-key verification, multi-device key management, forward secrecy, recovery, metadata protection, protocol versioning, and cross-instance delivery need a formal design.
+The server stores and federates opaque DM ciphertext. Cross-instance delivery is signed by the sending instance, requires sender/recipient encryption key IDs, and supports explicit public-key fingerprint verification. Incoming ciphertext is never converted to plaintext by the server.
+
+This design remains experimental. It does not establish an audited end-to-end security claim because client-side authenticated encryption, multi-device key management, forward secrecy, recovery, metadata protection, and key rotation still need a formal protocol and independent review. A green delivery state proves instance-level delivery, not that the human recipient's key was verified; the client must expose and compare fingerprints.
 
 The server still observes sender, recipient, timestamps, IP/session metadata, and message frequency. Voice/video through LiveKit is transport encrypted but processed/routed by the LiveKit infrastructure; it is not equivalent to a verified end-to-end group protocol.
+
+## Federation authenticity
+
+Federation envelopes are signed with persistent Ed25519 instance keys, addressed to one destination, timestamp bounded, sequence ordered, and idempotently stored by event ID. Replicas live outside authoritative local tables. These controls authenticate an allowlisted instance; they do not prove that its administrator or users are trustworthy. Peer trust scores and abuse reports support policy decisions but must not be presented as objective reputation.
+
+The instance private key is stored in SQLite. Database theft permits federation impersonation; database loss changes the instance identity. Back it up securely. Formal cross-signed key rotation and key revocation are not implemented yet.
 
 ## Secrets
 

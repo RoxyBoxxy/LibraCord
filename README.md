@@ -10,7 +10,7 @@
 LibraCord is a self-hosted, federated community chat experiment inspired by Discord. It combines persistent text channels, direct messages, voice/video rooms, screen sharing, community administration, profile customization, and public instance discovery in one Vue and Node.js application.
 
 > [!WARNING]
-> LibraCord is an alpha/MVP. It is suitable for development and private testing, but it has not received a security audit and its federation and direct-message encryption protocols are not production complete.
+> LibraCord is an alpha/MVP. Signed federation and encrypted cross-instance DM transport are implemented, but neither the protocol nor the client cryptography has received an independent security audit. Use controlled peers while the protocol stabilizes.
 
 ## Highlights
 
@@ -20,7 +20,7 @@ LibraCord is a self-hosted, federated community chat experiment inspired by Disc
 - LiveKit voice, webcam, screen sharing, application audio, and optional RTMP/WHIP ingress
 - Electron desktop client with native screen-source selection and configurable hardware acceleration
 - Avatars, banners, animated GIFs, image cropping, profile themes, decorations, and stackable username styles
-- Public instance discovery, community catalog aggregation, public feeds, and cached federated assets
+- Signed federation with durable remote memberships, idempotent delivery, offline reconciliation, replicated community policy, portable identities, and peer trust controls
 - Optional shared browser desktop
 - One root `.env` and one Docker Compose project for quick hosting
 
