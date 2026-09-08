@@ -160,6 +160,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   adminUsers = ref([]),
   adminModeration = ref({ bans: [], reports: [], actions: [], system_user: null }),
   guildDialog = ref(false),
+  mobileNavOpen = ref(true),
   guildWizardStep = ref("choose"),
   joinCommunityAddress = ref(""),
   newGuild = ref({ name: "", description: "", accessMode: "open" }),
@@ -791,6 +792,7 @@ async function logout() {
 }
 async function selectChannel(channel) {
   page.value = "chat";
+  mobileNavOpen.value = false;
   if (selected.value) socket.emit("channel:leave", selected.value.id);
   // Voice is independent from the currently browsed community/channel. Keep
   // the LiveKit room alive when navigating to text or another community;
@@ -1871,6 +1873,7 @@ async function openHome(tab = "feed") {
   shareDialogOpen.value = false;
   networkPanelOpen.value = false;
   page.value = "home";
+  mobileNavOpen.value = false;
   homeTab.value = tab;
   if (tab === "dm") {
     dmUnread.value = 0;
@@ -3073,7 +3076,7 @@ watch(
   <main
     v-else
     class="shell libracord-canvas bg-slate-950 text-slate-100"
-    :class="{ compact: settings.compact, 'members-collapsed': !membersPanelOpen }"
+    :class="{ compact: settings.compact, 'members-collapsed': !membersPanelOpen, 'mobile-nav-open': mobileNavOpen }"
     :style="communityAtmosphereStyle"
   >
     <aside class="servers">
@@ -3222,6 +3225,7 @@ watch(
       </footer>
     </aside>
     <aside class="channels">
+      <button class="mobile-nav-close" type="button" aria-label="Close community navigation" @click="mobileNavOpen = false">×</button>
       <header>
         <button
           v-if="page === 'chat'"
@@ -3368,6 +3372,7 @@ watch(
     </aside>
     <section v-if="page === 'chat'" class="chat" :class="{ 'voice-fullscreen': voiceRoom && selected?.id === voiceRoom.__channelId }">
       <header>
+        <button class="mobile-nav-toggle" type="button" aria-label="Open community navigation" @click="mobileNavOpen = true">☰</button>
         <div v-if="selected?.kind === 'voice'" class="voice-channel-heading">
           <strong>{{ selected?.name }}</strong>
           <small>{{ voiceRoom ? `${voiceParticipants.length} ${voiceParticipants.length === 1 ? 'person' : 'people'} connected` : `${channelPresence(selected).length} ${channelPresence(selected).length === 1 ? 'person' : 'people'} connected` }}</small>

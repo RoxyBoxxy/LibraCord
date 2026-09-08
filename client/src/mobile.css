@@ -1,0 +1,83 @@
+/* Final small-screen layout. This file is intentionally loaded last. */
+.mobile-nav-toggle,.mobile-nav-close{display:none}
+
+@media (max-width:620px){
+  html,body,#app{min-width:0;width:100%;height:100%;height:100dvh;overflow:hidden}
+  button{min-height:40px}
+  .libracord-canvas{height:100dvh;padding:0!important;grid-template-columns:52px minmax(0,1fr)!important;gap:0!important}
+  .libracord-canvas::after{inset:0!important;border-radius:0!important}
+  .servers{padding:8px 5px!important;border-radius:0!important}
+  .home-orbit,.workspace-orbit,.servers .server.add{width:40px!important;height:40px!important;flex-basis:40px!important;border-radius:12px!important}
+  .workspace-list{gap:7px!important}
+
+  .channels{position:fixed!important;z-index:80!important;inset:0 auto 0 52px!important;width:calc(100vw - 52px)!important;height:100dvh!important;border-radius:0!important;box-shadow:18px 0 55px #000c!important;transform:translateX(-110%);transition:transform .2s ease;visibility:hidden}
+  .mobile-nav-open .channels{transform:translateX(0);visibility:visible}
+  .mobile-nav-close{position:absolute;z-index:5;top:10px;right:10px;display:grid;width:40px;height:40px;padding:0;place-items:center;border:1px solid var(--lc-border-strong);border-radius:12px;background:rgba(7,10,24,.8);color:var(--lc-text);font-size:24px}
+  .channels>header{padding-right:58px!important}
+  .channels>section{overflow-y:auto}
+  .community-account{left:52px!important;bottom:0!important;width:calc(100vw - 52px)!important;visibility:hidden;transform:translateX(-110%);transition:transform .2s ease}
+  .top-voice-dock{left:52px!important;bottom:62px!important;width:calc(100vw - 52px)!important;visibility:hidden;transform:translateX(-110%);transition:transform .2s ease}
+  .mobile-nav-open .community-account,.mobile-nav-open .top-voice-dock{visibility:visible;transform:translateX(0)}
+  .mobile-nav-open::before{position:fixed;z-index:70;inset:0;background:#02040a88;content:""}
+
+  .chat,.home-hub,.admin{grid-column:2!important;border-radius:0!important}
+  .chat>header{min-height:56px!important;padding:0 10px!important;gap:8px}
+  .mobile-nav-toggle{display:grid;flex:0 0 40px;width:40px;height:40px;padding:0;place-items:center;border:1px solid var(--lc-border);border-radius:10px;background:var(--lc-raised);color:var(--lc-text)}
+  .text-channel-heading,.voice-channel-heading{min-width:0;overflow:hidden}
+  .text-channel-heading strong,.text-channel-heading small,.voice-channel-heading strong,.voice-channel-heading small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .channel-header-actions label{display:none!important}
+  .messages{padding:12px 10px 90px!important}
+  .messages article{gap:8px!important}
+  .messages article>.avatar,.messages article>.avatar-button .avatar{width:34px!important;height:34px!important}
+  .message-body{min-width:0}
+  .message-attachments img{max-width:100%!important;height:auto!important}
+  .chat>form:not(.voice-chat-composer){margin:0 8px 8px!important;min-height:52px}
+  .chat>form:not(.voice-chat-composer) input{min-width:0;padding:11px 6px!important}
+  .chat>form:not(.voice-chat-composer) button{padding-inline:12px!important}
+
+  .member-list{display:none!important}
+  .shell:not(.members-collapsed) .member-list{position:fixed!important;z-index:90!important;inset:0 0 0 52px!important;display:block!important;width:auto!important;border-radius:0!important;overflow-y:auto!important;background:rgba(9,12,25,.98)!important}
+  .member-list-heading{position:sticky;top:0;z-index:2;background:var(--lc-panel)}
+
+  .dialog-layer{padding:8px!important;align-items:end!important}
+  .dialog-layer>.dialog-card{width:100%!important;max-width:none!important;max-height:calc(100dvh - 16px)!important;padding:20px 16px!important;overflow-y:auto;border-radius:18px 18px 10px 10px!important}
+  .community-wizard-choices{grid-template-columns:1fr!important}
+
+  .settings-overlay,.guild-settings-overlay,.channel-settings-overlay,.settings-overlay.instance-style-settings{inset:0!important;display:grid!important;grid-template-columns:1fr!important;grid-template-rows:auto minmax(0,1fr)!important;border:0!important;border-radius:0!important}
+  .settings-overlay .settings-nav,.guild-settings-overlay .settings-nav,.channel-settings-overlay .settings-nav,.instance-style-settings>.settings-nav{position:relative!important;inset:auto!important;display:flex!important;width:100%!important;max-width:none!important;height:auto!important;max-height:126px!important;padding:10px 54px 10px 10px!important;gap:5px;overflow-x:auto!important;overflow-y:hidden!important;border:0!important;border-bottom:1px solid var(--lc-border)!important;box-shadow:none!important}
+  .settings-nav h3,.settings-nav .settings-nav-description,.settings-nav .settings-group{display:none!important}
+  .settings-nav button{flex:0 0 auto!important;width:auto!important;min-height:38px!important;margin:0!important;padding:8px 11px!important;white-space:nowrap}
+  .settings-content,.guild-settings-overlay .settings-content,.channel-settings-overlay .settings-content{grid-row:2!important;grid-column:1!important;width:100%!important;min-width:0!important;padding:0!important;overflow-y:auto!important}
+  .settings-content .close-settings{position:fixed!important;z-index:100!important;top:8px!important;right:8px!important;width:38px!important;height:38px!important}
+  .instance-style-settings>.settings-content>.settings-workspace-header{padding:20px 16px!important}
+  .instance-style-settings>.settings-content>.settings-workspace-body{padding:18px 14px 32px!important}
+  .profile-studio,.server-profile-layout,.role-workspace,.permission-editor{display:block!important;min-width:0!important}
+  .profile-live-preview,.server-card-preview{position:static!important;width:100%!important;margin:18px 0!important}
+  .role-list-panel,.permission-targets{border-right:0!important;border-bottom:1px solid var(--lc-border)!important;padding:14px!important}
+  .role-editor{padding:18px 14px!important}
+  .instance-form,.community-tag-fields,.trait-grid,.settings-create{grid-template-columns:1fr!important}
+  .image-upload-row,.community-background-upload{flex-wrap:wrap}
+
+  .voice-fullscreen .voice-stage,.voice-lobby-stage{inset:57px 0 82px!important;display:grid!important;grid-template-columns:1fr!important;grid-auto-rows:minmax(190px,1fr)!important;padding:8px!important;gap:8px!important;overflow-y:auto!important}
+  .voice-fullscreen .voice-stage:has(.screen-share-tile),.voice-fullscreen .voice-stage.voice-stage-focused{grid-template-columns:1fr!important;grid-template-rows:minmax(220px,1fr) 110px!important;grid-auto-rows:110px!important}
+  .voice-fullscreen .voice-stage:has(.screen-share-tile) .voice-participant-tile:not(.screen-share-tile),.voice-fullscreen .voice-stage.voice-stage-focused .voice-participant-tile:not(.focused),.voice-fullscreen .voice-stage.voice-stage-focused .voice-invite-tile{grid-row:auto!important;height:110px!important}
+  .voice-fullscreen .voice-bottom-toolbar{right:6px!important;bottom:6px!important;left:6px!important;width:auto!important;max-width:none!important;padding:7px 5px!important;gap:2px!important;overflow-x:auto}
+  .voice-fullscreen .voice-bottom-toolbar button{flex:0 0 38px!important;width:38px!important;height:38px!important;margin-bottom:16px!important}
+  .voice-fullscreen .voice-bottom-toolbar button::after{top:40px!important;font-size:9px!important}
+  .voice-side-panel{position:fixed!important;z-index:95!important;inset:56px 0 0 52px!important;width:auto!important}
+
+  .home-hero{padding:22px 16px!important}
+  .home-body,.discovery-grid,.creation-grid{padding:14px!important}
+  .discovery-grid,.creation-grid{grid-template-columns:1fr!important}
+  .dm-page{grid-template-columns:1fr!important}
+  .dm-sidebar{max-height:34dvh!important}
+  .dm-conversation{padding:0 10px 10px!important}
+}
+
+@media (max-width:380px){
+  .libracord-canvas{grid-template-columns:46px minmax(0,1fr)!important}
+  .channels,.community-account,.top-voice-dock{left:46px!important;width:calc(100vw - 46px)!important}
+  .shell:not(.members-collapsed) .member-list,.voice-side-panel{left:46px!important}
+  .servers{padding-inline:3px!important}
+  .home-orbit,.workspace-orbit,.servers .server.add{width:38px!important;height:38px!important}
+}

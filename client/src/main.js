@@ -24,4 +24,5 @@ import "./home.css";
 import "./cosmetics.css";
 import "./mini-decoration.css";
 import "./design-v3.css";
+import "./mobile.css";
 createApp(App).mount("#app");
