@@ -15,6 +15,8 @@ import { deliverFederationOutbox, federationDomain, federationEvents, publishCom
 import { moderationEvents } from "./moderation-events.js";
 
 const port = Number(process.env.PORT || 3002);
+// Voice media sessions are ephemeral; this process is the authoritative clock.
+const voiceMediaSessions = new Map();
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const allowAnyClientOrigin = allowedOrigins.includes("*");
@@ -90,8 +92,11 @@ io.on("connection", (socket) => {
   });
   socket.on("voice-chat:join", (id) => {
     const channelId = String(id || "");
-    if (channelExists(channelId, "voice") && userCanConnectToChannel(channelId, socket.user.id))
+    if (channelExists(channelId, "voice") && userCanConnectToChannel(channelId, socket.user.id)) {
       socket.join(`voice-chat:${channelId}`);
+      const media = voiceMediaSessions.get(channelId);
+      if (media) socket.emit("voice:media:state", media);
+    }
   });
   socket.on("voice-chat:leave", (id) => socket.leave(`voice-chat:${String(id || "")}`));
   socket.on("voice:message:create", (input, ack = () => {}) => {
@@ -103,6 +108,37 @@ io.on("connection", (socket) => {
     const message = createMessage({ channelId, authorId: socket.user.id, authorName: socket.user.display_name, body, attachments });
     io.to(`voice-chat:${channelId}`).emit("voice:message:created", message);
     ack({ ok: true, message });
+  });
+  socket.on("voice:media:update", (input, ack = () => {}) => {
+    const channelId = String(input?.channelId || "");
+    if (!channelExists(channelId, "voice") || !userCanConnectToChannel(channelId, socket.user.id))
+      return ack({ ok: false, error: "Voice channel access required" });
+    const previous = voiceMediaSessions.get(channelId) || { sourceUrl: "", kind: "none", title: "", playing: false, position: 0, updatedAt: Date.now(), revision: 0 };
+    const action = String(input?.action || "");
+    const now = Date.now();
+    const currentPosition = previous.playing ? previous.position + Math.max(0, (now - previous.updatedAt) / 1000) : previous.position;
+    const state = { ...previous, position: currentPosition, updatedAt: now, revision: previous.revision + 1,
+      updatedBy: socket.user.id, updatedByName: socket.user.display_name };
+    if (action === "load") {
+      const sourceUrl = String(input?.sourceUrl || "").trim().slice(0, 2048);
+      if (!sourceUrl || (!/^https?:\/\//i.test(sourceUrl) && !sourceUrl.startsWith("/api/v1/assets/")))
+        return ack({ ok: false, error: "Use a YouTube, SoundCloud, or server media URL" });
+      state.sourceUrl = sourceUrl;
+      state.kind = ["youtube", "soundcloud", "video", "audio"].includes(input?.kind) ? input.kind : "video";
+      state.title = String(input?.title || "Shared media").trim().slice(0, 160);
+      state.position = 0;
+      state.playing = false;
+    } else if (["play", "pause", "seek"].includes(action)) {
+      state.position = Math.max(0, Math.min(86_400, Number(input?.position ?? currentPosition) || 0));
+      state.playing = action === "play" ? true : action === "pause" ? false : previous.playing;
+    } else if (action === "close") {
+      voiceMediaSessions.delete(channelId);
+      io.to(`voice-chat:${channelId}`).emit("voice:media:state", null);
+      return ack({ ok: true });
+    } else return ack({ ok: false, error: "Unsupported media action" });
+    voiceMediaSessions.set(channelId, state);
+    io.to(`voice-chat:${channelId}`).emit("voice:media:state", state);
+    ack({ ok: true, state });
   });
   socket.on("message:create", (input, ack = () => {}) => {
     const channelId = String(input?.channelId || "");

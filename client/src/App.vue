@@ -34,6 +34,13 @@ import {
   faUsers,
   faVolumeHigh,
   faVolumeXmark,
+  faPlay,
+  faPause,
+  faBackwardStep,
+  faForwardStep,
+  faMusic,
+  faFilm,
+  faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 const configuredServer = new URLSearchParams(window.location.search).get("server"),
   serverOrigin = configuredServer ? configuredServer.replace(/\/$/, "") : "",
@@ -151,7 +158,12 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   selectedShareSource = ref(""),
   shareSourceTab = ref("applications"),
   networkPanelOpen = ref(false),
-  browserSession = ref(null),
+  mediaSession = ref(null),
+  mediaSourceDraft = ref(""),
+  mediaPosition = ref(0),
+  sharedMediaElement = ref(null),
+  sharedMediaFrame = ref(null),
+  applyingMediaState = ref(false),
   networkStats = ref({ quality: "Unknown", ping: "—", bitrate: "—", codec: "—", jitter: "—", fps: "—" }),
   peers = ref([]),
   peerForm = ref({ name: "", baseUrl: "", status: "pending" }),
@@ -1660,17 +1672,73 @@ async function startScreenShare() {
     voiceStatus.value = e.message || "Screen sharing was cancelled";
   }
 }
-async function startSharedBrowser() {
-  if (!voiceRoom.value || !selected.value) return;
-  try {
-    browserSession.value = await api("/api/v1/voice/browser", {
-      method: "POST",
-      body: JSON.stringify({ channelId: selected.value.id, url: "https://www.wikipedia.org" }),
-    });
-  } catch (e) { voiceStatus.value = e.message; }
+function mediaSource(url) {
+  const value = String(url || "").trim();
+  const youtube = value.match(/(?:youtube\.com\/(?:watch\?v=|shorts\/|embed\/)|youtu\.be\/)([\w-]{6,})/i)?.[1];
+  if (youtube) return { kind: "youtube", url: value, embed: `https://www.youtube-nocookie.com/embed/${youtube}?enablejsapi=1&playsinline=1` };
+  if (/soundcloud\.com\//i.test(value)) return { kind: "soundcloud", url: value, embed: `https://w.soundcloud.com/player/?url=${encodeURIComponent(value)}&auto_play=false&show_artwork=true&visual=true` };
+  const clean = value.split("?")[0].toLowerCase();
+  return { kind: /\.(mp3|wav|ogg|flac|m4a|aac)$/.test(clean) ? "audio" : "video", url: value, embed: apiEndpoint(value) };
 }
-function closeSharedBrowser() { browserSession.value = null; }
+function startMediaBrowser() {
+  if (!voiceRoom.value) return;
+  mediaSession.value ||= { sourceUrl: "", kind: "none", title: "Shared media", playing: false, position: 0, updatedAt: Date.now() };
+}
+function loadSharedMedia() {
+  const source = mediaSource(mediaSourceDraft.value);
+  if (!/^https?:\/\//i.test(source.url) && !source.url.startsWith("/api/v1/assets/")) {
+    error.value = "Use a YouTube, SoundCloud, or server media URL."; return;
+  }
+  socket.emit("voice:media:update", { channelId: voiceRoom.value?.__channelId, action: "load", sourceUrl: source.url, kind: source.kind, title: source.kind === "youtube" ? "YouTube" : source.kind === "soundcloud" ? "SoundCloud" : "Server media" },
+    (result) => { if (!result?.ok) error.value = result?.error || "Media could not be loaded"; });
+}
+function sharedMediaPosition() {
+  const element = sharedMediaElement.value;
+  return Number(element?.currentTime ?? mediaPosition.value ?? mediaSession.value?.position ?? 0) || 0;
+}
+function controlSharedMedia(action) {
+  if (!voiceRoom.value?.__channelId || !mediaSession.value) return;
+  socket.emit("voice:media:update", { channelId: voiceRoom.value.__channelId, action, position: sharedMediaPosition() });
+}
+function seekSharedMedia() {
+  socket.emit("voice:media:update", { channelId: voiceRoom.value?.__channelId, action: "seek", position: Number(mediaPosition.value) || 0 });
+}
+function skipSharedMedia(seconds) {
+  mediaPosition.value = Math.max(0, sharedMediaPosition() + seconds);
+  seekSharedMedia();
+}
+function applySharedMediaState(state) {
+  mediaSession.value = state;
+  if (!state) {
+    if (focusedVoiceParticipant.value === "__media__") focusedVoiceParticipant.value = null;
+    return;
+  }
+  mediaPosition.value = state.position + (state.playing ? Math.max(0, (Date.now() - state.updatedAt) / 1000) : 0);
+  nextTick(() => {
+    const element = sharedMediaElement.value;
+    const frame = sharedMediaFrame.value;
+    if (frame && state.sourceUrl) {
+      if (state.kind === "youtube") {
+        frame.contentWindow?.postMessage(JSON.stringify({ event: "command", func: "seekTo", args: [mediaPosition.value, true] }), "*");
+        frame.contentWindow?.postMessage(JSON.stringify({ event: "command", func: state.playing ? "playVideo" : "pauseVideo", args: [] }), "*");
+      } else if (state.kind === "soundcloud") {
+        frame.contentWindow?.postMessage(JSON.stringify({ method: "seekTo", value: Math.round(mediaPosition.value * 1000) }), "*");
+        frame.contentWindow?.postMessage(JSON.stringify({ method: state.playing ? "play" : "pause" }), "*");
+      }
+    }
+    if (!element) return;
+    applyingMediaState.value = true;
+    try { if (Math.abs((element.currentTime || 0) - mediaPosition.value) > 1.25) element.currentTime = mediaPosition.value; } catch {}
+    const operation = state.playing ? element.play() : (element.pause(), null);
+    Promise.resolve(operation).catch(() => {}).finally(() => { applyingMediaState.value = false; });
+  });
+}
+function closeSharedMedia() {
+  if (focusedVoiceParticipant.value === "__media__") focusedVoiceParticipant.value = null;
+  socket.emit("voice:media:update", { channelId: voiceRoom.value?.__channelId, action: "close" });
+}
 let networkTimer;
+let mediaClockTimer;
 const networkBaseline = new Map();
 async function refreshNetworkStats() {
   if (!voiceRoom.value) return;
@@ -2828,6 +2896,7 @@ socket.on("voice:message:created", (message) => {
   if (message.channel_id === voiceRoom.value?.__channelId && !voiceMessages.value.some((item) => item.id === message.id))
     voiceMessages.value.push(message);
 });
+socket.on("voice:media:state", (state) => applySharedMediaState(state));
 socket.on("voice:presence-changed", (communityId) => {
   if (String(communityId) === String(activeCommunityId.value)) refreshVoicePresence();
 });
@@ -2925,6 +2994,10 @@ socket.on("connect_error", () => {
     : "The server is unavailable. Retrying…";
 });
 onMounted(async () => {
+  mediaClockTimer = setInterval(() => {
+    if (mediaSession.value?.playing && !sharedMediaElement.value)
+      mediaPosition.value = mediaSession.value.position + Math.max(0, (Date.now() - mediaSession.value.updatedAt) / 1000);
+  }, 500);
   window.addEventListener("keydown", handleLightboxKey);
   try {
     const codecs = window.RTCRtpSender?.getCapabilities?.("audio")?.codecs || [];
@@ -2954,6 +3027,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleLightboxKey);
   clearInterval(networkTimer);
+  clearInterval(mediaClockTimer);
   dockObserver?.disconnect();
   document.removeEventListener("contextmenu", showAppMenu);
   window.removeEventListener("online", retryConnection);
@@ -3523,6 +3597,25 @@ watch(
           <span class="voice-name">{{ participant.isScreen ? `${participant.identity} · Screen` : `${participant.identity}${participant.local ? " (you)" : ""}` }}</span>
           <span v-if="!participant.isScreen" class="voice-activity" :class="{ active: voiceActiveSpeakers.includes(participant.participantSid || participant.sid) }" aria-label="Voice activity"><i></i><i></i><i></i><i></i></span>
         </button>
+        <article v-if="mediaSession" class="voice-participant-tile screen-share-tile screen-tile shared-media-tile" :class="{ focused: focusedVoiceParticipant === '__media__' }" @click="focusedVoiceParticipant = focusedVoiceParticipant === '__media__' ? null : '__media__'">
+          <form v-if="!mediaSession.sourceUrl || focusedVoiceParticipant === '__media__'" class="shared-media-source" @click.stop @submit.prevent="loadSharedMedia"><FontAwesomeIcon :icon="faMusic" /><input v-model="mediaSourceDraft" placeholder="YouTube, SoundCloud, or server media URL" /><button class="primary">Load</button></form>
+          <button class="shared-media-focus" type="button" :title="focusedVoiceParticipant === '__media__' ? 'Back to grid' : 'Focus shared media'" @click.stop="focusedVoiceParticipant = focusedVoiceParticipant === '__media__' ? null : '__media__'"><FontAwesomeIcon :icon="faDisplay" /></button>
+          <div v-if="mediaSession.sourceUrl" class="shared-media-stage">
+            <iframe v-if="['youtube','soundcloud'].includes(mediaSession.kind)" :key="mediaSession.sourceUrl" ref="sharedMediaFrame" :src="mediaSource(mediaSession.sourceUrl).embed" title="Shared media" allow="autoplay; fullscreen; encrypted-media" @load="applySharedMediaState(mediaSession)"></iframe>
+            <audio v-else-if="mediaSession.kind === 'audio'" ref="sharedMediaElement" :src="mediaSource(mediaSession.sourceUrl).embed" preload="auto" @loadedmetadata="applySharedMediaState(mediaSession)" @timeupdate="mediaPosition = $event.target.currentTime"></audio>
+            <video v-else ref="sharedMediaElement" :src="mediaSource(mediaSession.sourceUrl).embed" preload="auto" playsinline @loadedmetadata="applySharedMediaState(mediaSession)" @timeupdate="mediaPosition = $event.target.currentTime"></video>
+          </div>
+          <div v-else class="shared-media-empty"><FontAwesomeIcon :icon="faFilm" /><b>Shared media</b><span>Load something to watch or listen to together.</span></div>
+          <footer v-if="mediaSession.sourceUrl" class="shared-media-controls" @click.stop>
+            <button title="Back 10 seconds" aria-label="Back 10 seconds" @click="skipSharedMedia(-10)"><FontAwesomeIcon :icon="faBackwardStep" /></button>
+            <button class="media-play" :title="mediaSession.playing ? 'Pause' : 'Play'" :aria-label="mediaSession.playing ? 'Pause' : 'Play'" @click="controlSharedMedia(mediaSession.playing ? 'pause' : 'play')"><FontAwesomeIcon :icon="mediaSession.playing ? faPause : faPlay" /></button>
+            <button title="Forward 10 seconds" aria-label="Forward 10 seconds" @click="skipSharedMedia(10)"><FontAwesomeIcon :icon="faForwardStep" /></button>
+            <input v-model.number="mediaPosition" aria-label="Media position" type="range" min="0" :max="Math.max(3600, mediaPosition + 60)" step="0.25" @change="seekSharedMedia" />
+            <output>{{ Math.floor(mediaPosition / 60) }}:{{ String(Math.floor(mediaPosition % 60)).padStart(2, '0') }}</output>
+            <button title="Close shared media" aria-label="Close shared media" @click="closeSharedMedia"><FontAwesomeIcon :icon="faXmark" /></button>
+          </footer>
+          <span class="voice-name"><FontAwesomeIcon :icon="mediaSession.kind === 'audio' || mediaSession.kind === 'soundcloud' ? faMusic : faFilm" /> {{ mediaSession.title || 'Shared media' }} · {{ mediaSession.updatedByName || 'Voice channel' }}</span>
+        </article>
         <button v-if="!focusedVoiceParticipant && selected?.id === voiceRoom.__channelId" class="voice-invite-tile" type="button" @click="openGuildSettings('invites')">
           <span>＋</span><strong>Invite someone</strong><small>Share this room with friends</small>
         </button>
@@ -3549,7 +3642,7 @@ watch(
         <button :title="micMuted ? 'Unmute' : 'Mute'" :aria-label="micMuted ? 'Unmute' : 'Mute'" :data-label="micMuted ? 'Unmute' : 'Mute'" @click="toggleMic"><FontAwesomeIcon :icon="micMuted ? faMicrophoneSlash : faMicrophone" /></button>
         <button :title="voiceRoom.localParticipant.isCameraEnabled ? 'Camera off' : 'Camera'" aria-label="Camera" data-label="Camera" @click="toggleCamera"><FontAwesomeIcon :icon="faCamera" /></button>
         <button title="Share screen" aria-label="Share screen" data-label="Share" @click="toggleScreenShare"><FontAwesomeIcon :icon="faDisplay" /></button>
-        <button title="Firefox browser" aria-label="Firefox browser" data-label="Browser" @click="startSharedBrowser"><FontAwesomeIcon :icon="faDisplay" /></button>
+        <button title="Shared media" aria-label="Shared media" data-label="Media" @click="startMediaBrowser"><FontAwesomeIcon :icon="faDisplay" /></button>
         <button :title="voicePanelOpen ? 'Hide chat' : 'Side chat'" :aria-label="voicePanelOpen ? 'Hide chat' : 'Side chat'" data-label="Chat" @click="voicePanelOpen = !voicePanelOpen"><FontAwesomeIcon :icon="faComments" /></button>
         <button title="Network diagnostics" aria-label="Network diagnostics" data-label="Network" @click="networkPanelOpen = !networkPanelOpen; refreshNetworkStats()"><FontAwesomeIcon :icon="faChartSimple" /></button>
         <button class="hangup" title="Leave voice" aria-label="Leave voice" data-label="Disconnect" @click="leaveVoice"><FontAwesomeIcon :icon="faPhoneSlash" /></button>
@@ -3559,10 +3652,6 @@ watch(
         <span class="network-quality">● {{ networkStats.quality }}</span>
         <dl><dt>Ping</dt><dd>{{ networkStats.ping }}</dd><dt>Bitrate</dt><dd>{{ networkStats.bitrate }}</dd><dt>Audio codec</dt><dd>{{ networkStats.codec }}</dd><dt>Jitter</dt><dd>{{ networkStats.jitter }}</dd><dt>Video FPS</dt><dd>{{ networkStats.fps }}</dd></dl>
       </aside>
-      <div v-if="browserSession" class="shared-browser-panel">
-        <header><strong>Shared Firefox</strong><button @click="closeSharedBrowser">×</button></header>
-        <iframe :src="browserSession.url" title="Shared Firefox browser" allow="autoplay; fullscreen"></iframe>
-      </div>
       <aside v-if="voiceRoom && voicePanelOpen" class="voice-side-chat">
         <header><div><strong>{{ voiceChatChannelName || 'Voice' }} chat</strong><small>Only for this voice channel</small></div><button @click="voicePanelOpen = false">×</button></header>
         <div class="voice-side-messages">
