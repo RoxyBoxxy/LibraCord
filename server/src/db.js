@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,6 +8,21 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const dbPath = resolve(projectRoot, process.env.DATABASE_PATH || "data/libracord.db");
 mkdirSync(dirname(dbPath), { recursive: true });
 const db = new DatabaseSync(dbPath);
+const messageAtRestKey = createHash("sha256").update(process.env.MESSAGE_ENCRYPTION_KEY || "libra-dev-message-key-change-me").digest();
+function encryptMessageValue(value) {
+  const iv = randomBytes(12), cipher = createCipheriv("aes-256-gcm", messageAtRestKey, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+  return `enc:v1:${iv.toString("base64url")}:${cipher.getAuthTag().toString("base64url")}:${encrypted.toString("base64url")}`;
+}
+function decryptMessageValue(value) {
+  if (!String(value).startsWith("enc:v1:")) return value;
+  try {
+    const [, , iv, tag, payload] = String(value).split(":");
+    const decipher = createDecipheriv("aes-256-gcm", messageAtRestKey, Buffer.from(iv, "base64url"));
+    decipher.setAuthTag(Buffer.from(tag, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(payload, "base64url")), decipher.final()]).toString("utf8");
+  } catch { return "[Unable to decrypt message]"; }
+}
 db.exec(`
  PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;
  CREATE TABLE IF NOT EXISTS communities(id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '');
@@ -62,6 +77,7 @@ for (const [name, definition] of [["attachments", "TEXT NOT NULL DEFAULT '[]'"],
   if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
 }
+if (!db.prepare("SELECT 1 FROM pragma_table_info('channels') WHERE name=?").get("e2ee_enabled")) db.exec("ALTER TABLE channels ADD COLUMN e2ee_enabled INTEGER NOT NULL DEFAULT 0");
 for (const [name, definition] of [["kind", "TEXT NOT NULL DEFAULT 'user'"], ["metadata", "TEXT NOT NULL DEFAULT '{}'" ]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('direct_messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE direct_messages ADD COLUMN ${name} ${definition}`);
@@ -283,6 +299,7 @@ export function listMessages(id) {
     .reverse()
     .map((message) => ({
       ...message,
+      body: decryptMessageValue(message.body),
       attachments: (() => { try { return JSON.parse(message.attachments || "[]"); } catch { return []; } })(),
     }));
 }
@@ -292,7 +309,7 @@ export function createMessage({ channelId, authorId, authorName, body, attachmen
     .prepare(
       "INSERT INTO messages(channel_id,author_id,author_name,body,created_at,attachments,content_warning,reply_to) VALUES(?,?,?,?,?,?,?,?)",
     )
-    .run(channelId, authorId, authorName, body, createdAt, JSON.stringify(attachments), contentWarning, replyTo);
+    .run(channelId, authorId, authorName, encryptMessageValue(body), createdAt, JSON.stringify(attachments), contentWarning, replyTo);
   return {
     id: Number(result.lastInsertRowid),
     channel_id: channelId,
@@ -588,6 +605,9 @@ export function createAsset(asset) {
 export function findAsset(id) {
   return db.prepare("SELECT * FROM assets WHERE id=?").get(id);
 }
+export function listMediaAssets() {
+  return db.prepare("SELECT id,kind,mime_type,size,filename,created_at FROM assets WHERE mime_type LIKE 'audio/%' OR mime_type LIKE 'video/%' ORDER BY created_at DESC LIMIT 500").all();
+}
 export function findAllowedPeer(id) {
   return db
     .prepare("SELECT * FROM federation_peers WHERE id=? AND status='allowed'")
@@ -808,10 +828,10 @@ export function listWebhooks(guildId) {
 }
 export function updateChannel(
   id,
-  { name, categoryId, topic, slowmodeSeconds, contentVisibility, announcement, nsfw, voiceCodec, voiceBitrate, voiceSampleRate, position },
+  { name, categoryId, topic, slowmodeSeconds, contentVisibility, announcement, nsfw, voiceCodec, voiceBitrate, voiceSampleRate, position, e2eeEnabled },
 ) {
   db.prepare(
-    "UPDATE channels SET name=?,category_id=?,topic=?,slowmode_seconds=?,content_visibility=?,announcement=?,nsfw=?,voice_codec=?,voice_bitrate=?,voice_sample_rate=?,position=? WHERE id=?",
+    "UPDATE channels SET name=?,category_id=?,topic=?,slowmode_seconds=?,content_visibility=?,announcement=?,nsfw=?,voice_codec=?,voice_bitrate=?,voice_sample_rate=?,position=?,e2ee_enabled=? WHERE id=?",
   ).run(
     name,
     categoryId || null,
@@ -824,6 +844,7 @@ export function updateChannel(
     Number(voiceBitrate) || 64000,
     Number(voiceSampleRate) || 48000,
     Number(position) || 0,
+    e2eeEnabled ? 1 : 0,
     id,
   );
   return db.prepare("SELECT * FROM channels WHERE id=?").get(id);

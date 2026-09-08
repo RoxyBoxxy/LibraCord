@@ -159,6 +159,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   shareSourceTab = ref("applications"),
   networkPanelOpen = ref(false),
   mediaSession = ref(null),
+  mediaLibrary = ref([]),
   mediaSourceDraft = ref(""),
   mediaPosition = ref(0),
   sharedMediaElement = ref(null),
@@ -255,6 +256,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   statusEditorOpen = ref(false),
   statusDraft = ref({ status: "online", text: "" }),
   userMenu = ref(null),
+  voiceUserVolumes = ref({}),
   passwords = ref({ current: "", next: "" }),
   audioDevices = ref({ inputs: [], outputs: [] }),
   videoDevices = ref([]),
@@ -688,6 +690,44 @@ async function ensureDmKey() {
     localStorage.setItem(dmKeyStorage(), JSON.stringify({ private: await crypto.subtle.exportKey("jwk", pair.privateKey), public: dmPublicKey.value }));
   }
   await api("/api/v1/crypto/key", { method: "PUT", body: JSON.stringify({ publicKey: JSON.stringify(dmPublicKey.value) }) });
+}
+async function exportDmKeys() {
+  await ensureDmKey();
+  const privateJwk = await crypto.subtle.exportKey("jwk", dmPrivateKey.value);
+  const password = window.prompt("Set a password for this encryption-key backup (at least 8 characters):");
+  if (!password || password.length < 8) { saved.value = "Backup password must be at least 8 characters"; return; }
+  const confirmation = window.prompt("Confirm your backup password:");
+  if (password !== confirmation) { saved.value = "Backup passwords do not match"; return; }
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+  const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt, iterations: 250000, hash: "SHA-256" }, baseKey, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+  const encrypted = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(JSON.stringify({ public: dmPublicKey.value, private: privateJwk })));
+  const payload = { format: "libracord-e2ee-key", version: 2, kdf: "PBKDF2-SHA256", iterations: 250000, salt: bytesToBase64(salt), iv: bytesToBase64(iv), encrypted: bytesToBase64(new Uint8Array(encrypted)), exportedAt: new Date().toISOString() };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = "libracord-e2ee-key.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+  saved.value = "Encryption keys exported";
+}
+async function importDmKeys(event) {
+  const file = event.target.files?.[0]; event.target.value = "";
+  if (!file) return;
+  try {
+    const payload = JSON.parse(await file.text());
+    if (payload?.format !== "libracord-e2ee-key") throw new Error("Invalid LibraCord key backup");
+    let keys = payload;
+    if (payload.version === 2) {
+      const password = window.prompt("Enter your backup password or recovery phrase"); if (!password) return;
+      const baseKey = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveKey"]);
+      const key = await crypto.subtle.deriveKey({ name: "PBKDF2", salt: base64ToBytes(payload.salt), iterations: payload.iterations, hash: "SHA-256" }, baseKey, { name: "AES-GCM", length: 256 }, false, ["decrypt"]);
+      keys = JSON.parse(new TextDecoder().decode(await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(payload.iv) }, key, base64ToBytes(payload.encrypted))));
+    }
+    if (!keys.private || !keys.public) throw new Error("Invalid LibraCord key backup");
+    const privateKey = await crypto.subtle.importKey("jwk", keys.private, { name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
+    dmPrivateKey.value = privateKey; dmPublicKey.value = keys.public;
+    localStorage.setItem(dmKeyStorage(), JSON.stringify({ private: keys.private, public: keys.public }));
+    await api("/api/v1/crypto/key", { method: "PUT", body: JSON.stringify({ publicKey: JSON.stringify(dmPublicKey.value) }) });
+    saved.value = "Encryption keys imported";
+  } catch (error) { saved.value = error.message || "Could not import encryption keys"; }
 }
 async function dmSharedKey(otherId) {
   await ensureDmKey();
@@ -1489,6 +1529,8 @@ function syncVoiceParticipants() {
   voiceParticipants.value = [
     { sid: local.sid, userId: user.value.id, identity: user.value.display_name, local: true, avatar: user.value.avatar_url, banner: user.value.banner_url, color: user.value.accent_color },
     ...[...voiceRoom.value.remoteParticipants.values()].map((participant) => {
+      const savedVolume = voiceUserVolumes.value[participant.sid];
+      if (savedVolume != null) participant.setVolume?.(Number(savedVolume) / 100);
       const member = guildMembers.value.find(
         (entry) => entry.id === participant.identity || entry.username === participant.identity,
       );
@@ -1683,6 +1725,7 @@ function mediaSource(url) {
 function startMediaBrowser() {
   if (!voiceRoom.value) return;
   mediaSession.value ||= { sourceUrl: "", kind: "none", title: "Shared media", playing: false, position: 0, updatedAt: Date.now() };
+  fetch(apiEndpoint("/api/v1/media/library"), { credentials: "include" }).then((response) => response.ok ? response.json() : { assets: [] }).then((payload) => { mediaLibrary.value = payload.assets || []; }).catch(() => { mediaLibrary.value = []; });
 }
 function loadSharedMedia() {
   const source = mediaSource(mediaSourceDraft.value);
@@ -1691,6 +1734,16 @@ function loadSharedMedia() {
   }
   socket.emit("voice:media:update", { channelId: voiceRoom.value?.__channelId, action: "load", sourceUrl: source.url, kind: source.kind, title: source.kind === "youtube" ? "YouTube" : source.kind === "soundcloud" ? "SoundCloud" : "Server media" },
     (result) => { if (!result?.ok) error.value = result?.error || "Media could not be loaded"; });
+}
+async function importSharedMedia() {
+  const url = mediaSourceDraft.value.trim();
+  if (!url) return;
+  const response = await fetch(apiEndpoint("/api/v1/media/import"), { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) { error.value = payload.error || "Local media import failed"; return; }
+  mediaSourceDraft.value = payload.asset.url;
+  await loadSharedMedia();
+  startMediaBrowser();
 }
 function sharedMediaPosition() {
   const element = sharedMediaElement.value;
@@ -2207,6 +2260,7 @@ async function openChannelSettings(
     voiceCodec: channel.voice_codec || "opus",
     voiceBitrate: channel.voice_bitrate || 64000,
     voiceSampleRate: channel.voice_sample_rate || 48000,
+    e2eeEnabled: Boolean(channel.e2ee_enabled),
     nsfw: Boolean(channel.nsfw),
   };
   channelSettingsTab.value = tab;
@@ -2274,6 +2328,7 @@ async function saveChannelSettings() {
     voiceCodec: result.channel.voice_codec || "opus",
     voiceBitrate: result.channel.voice_bitrate || 64000,
     voiceSampleRate: result.channel.voice_sample_rate || 48000,
+    e2eeEnabled: Boolean(result.channel.e2ee_enabled),
   };
   saved.value = "Channel saved";
   emitCommunityChanged(activeCommunity.value?.id);
@@ -2719,9 +2774,28 @@ function showUserMenu(event, subject) {
   userMenu.value = {
     id: subject.id || subject.author_id,
     name: subject.username || subject.author_name,
-    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 210)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 330)),
+    voiceSid: subject.voiceSid || null,
+    voiceVolume: subject.voiceSid ? Number(voiceUserVolumes.value[subject.voiceSid] ?? 100) : null,
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 300)),
+    y: Math.max(8, Math.min(event.clientY > window.innerHeight / 2 ? event.clientY - 430 : event.clientY, window.innerHeight - 520)),
   };
+  nextTick(() => {
+    const menu = document.querySelector(".user-context-menu");
+    if (!menu || !userMenu.value) return;
+    const rect = menu.getBoundingClientRect();
+    userMenu.value = {
+      ...userMenu.value,
+      x: Math.max(8, Math.min(userMenu.value.x, window.innerWidth - rect.width - 8)),
+      y: Math.max(8, Math.min(userMenu.value.y, window.innerHeight - rect.height - 8)),
+    };
+  });
+}
+function setVoiceUserVolume(sid, value) {
+  const volume = Math.max(0, Math.min(200, Number(value) || 0));
+  voiceUserVolumes.value = { ...voiceUserVolumes.value, [sid]: volume };
+  const participant = voiceRoom.value?.remoteParticipants.get(sid);
+  participant?.setVolume?.(volume / 100);
+  if (userMenu.value?.voiceSid === sid) userMenu.value.voiceVolume = volume;
 }
 function mentionUser() {
   const name = userMenu.value?.name || activeProfile.value?.username;
@@ -3589,6 +3663,7 @@ watch(
           }"
           :style="{ '--voice-color': participant.color }"
           @click="focusVoiceParticipant(participant)"
+          @contextmenu.stop="showUserMenu($event, { ...participant, voiceSid: participant.participantSid || participant.sid })"
         >
           <span v-if="participant.banner && !participant.isScreen" class="voice-profile-banner" :style="{ backgroundImage: `url(${apiEndpoint(participant.banner)})` }"></span>
           <img v-if="participant.avatar && !participant.isScreen" class="voice-profile-avatar" :src="apiEndpoint(participant.avatar)" alt="" />
@@ -3598,7 +3673,7 @@ watch(
           <span v-if="!participant.isScreen" class="voice-activity" :class="{ active: voiceActiveSpeakers.includes(participant.participantSid || participant.sid) }" aria-label="Voice activity"><i></i><i></i><i></i><i></i></span>
         </button>
         <article v-if="mediaSession" class="voice-participant-tile screen-share-tile screen-tile shared-media-tile" :class="{ focused: focusedVoiceParticipant === '__media__' }" @click="focusedVoiceParticipant = focusedVoiceParticipant === '__media__' ? null : '__media__'">
-          <form v-if="!mediaSession.sourceUrl || focusedVoiceParticipant === '__media__'" class="shared-media-source" @click.stop @submit.prevent="loadSharedMedia"><FontAwesomeIcon :icon="faMusic" /><input v-model="mediaSourceDraft" placeholder="YouTube, SoundCloud, or server media URL" /><button class="primary">Load</button></form>
+          <form v-if="!mediaSession.sourceUrl || focusedVoiceParticipant === '__media__'" class="shared-media-source" @click.stop @submit.prevent="loadSharedMedia"><FontAwesomeIcon :icon="faMusic" /><input v-model="mediaSourceDraft" list="media-library" placeholder="YouTube, SoundCloud, or server media URL" /><datalist id="media-library"><option v-for="asset in mediaLibrary" :key="asset.id" :value="asset.url">{{ asset.title }}</option></datalist><button class="primary">Load</button><button type="button" title="Import locally with yt-dlp (development only)" @click="importSharedMedia">Import</button></form>
           <button class="shared-media-focus" type="button" :title="focusedVoiceParticipant === '__media__' ? 'Back to grid' : 'Focus shared media'" @click.stop="focusedVoiceParticipant = focusedVoiceParticipant === '__media__' ? null : '__media__'"><FontAwesomeIcon :icon="faDisplay" /></button>
           <div v-if="mediaSession.sourceUrl" class="shared-media-stage">
             <iframe v-if="['youtube','soundcloud'].includes(mediaSession.kind)" :key="mediaSession.sourceUrl" ref="sharedMediaFrame" :src="mediaSource(mediaSession.sourceUrl).embed" title="Shared media" allow="autoplay; fullscreen; encrypted-media" @load="applySharedMediaState(mediaSession)"></iframe>
@@ -4308,6 +4383,10 @@ watch(
       <button @click="openProfile(userMenu.id)">Profile</button>
       <button @click="openDm({ id: userMenu.id, display_name: userMenu.name })">Message</button>
       <button @click="mentionUser">Mention</button>
+      <template v-if="userMenu.voiceSid">
+        <div class="context-separator"></div>
+        <label class="voice-volume-control"><span>Voice volume <output>{{ userMenu.voiceVolume }}%</output></span><input v-model.number="userMenu.voiceVolume" type="range" min="0" max="200" step="1" @input="setVoiceUserVolume(userMenu.voiceSid, userMenu.voiceVolume)" /></label>
+      </template>
       <div class="context-separator"></div>
       <button @click="openProfile(userMenu.id, 'full')">
         Edit Per-server Profile
@@ -4491,6 +4570,7 @@ watch(
               {{ (channelSettingsForm.topic || "").length }}/1024
             </small>
           </label>
+          <label class="toggle"><input v-model="channelSettingsForm.e2eeEnabled" type="checkbox" /> Enable private-channel encryption <small>Marks this channel for the E2EE rollout. Client key distribution and encrypted message delivery will be enabled in the next protocol migration.</small></label>
           <template v-if="channelSettingsForm.kind === 'voice'">
             <label>Audio codec<select v-model="channelSettingsForm.voiceCodec"><option v-for="codec in supportedVoiceCodecs" :key="codec.value" :value="codec.value">{{ codec.label }}</option></select><small>Only codecs supported by this browser are shown.</small></label>
             <label>Audio bitrate<select v-model.number="channelSettingsForm.voiceBitrate"><option v-for="rate in [24000,32000,48000,64000,96000,128000,192000,256000,320000]" :key="rate" :value="rate">{{ rate / 1000 }} kbps</option></select></label>
@@ -5797,7 +5877,9 @@ watch(
         ><template v-else-if="settingsTab === 'privacy'"
           ><h2>Privacy &amp; Safety</h2>
           <label class="toggle"><input v-model="settings.showMessagePreviews" type="checkbox" /> Show message previews in notifications</label>
-          <p class="settings-help">Direct-message encryption and community moderation policies continue to use LibraCord's existing security controls.</p>
+          <h3>End-to-end encryption</h3>
+          <p class="settings-help">Export a password-protected backup before changing devices. Anyone with the backup and its password can decrypt your encrypted direct messages.</p>
+          <div class="key-backup-actions"><button type="button" class="secondary" @click="exportDmKeys">Export private keys</button><label class="secondary key-import-button">Import private keys<input type="file" accept="application/json,.json" @change="importDmKeys" /></label></div>
           <button class="primary" @click="saveSettings">Save privacy settings</button></template
         ><template v-else-if="settingsTab === 'language'"
           ><h2>Language</h2>

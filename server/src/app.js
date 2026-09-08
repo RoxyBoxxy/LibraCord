@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { readFile, unlink } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import express from "express";
 import cors from "cors";
@@ -87,6 +90,7 @@ import {
   listDirectMessageContacts, getSystemUser, createSystemDirectMessage,
   banInstanceUser, unbanInstanceUser, listInstanceBans, createInstanceReport,
   listInstanceReports, updateInstanceReport, listInstanceModerationActions,
+  listMediaAssets,
 } from "./db.js";
 import { proxyAsset, sendAsset, storeAsset } from "./assets.js";
 import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js";
@@ -98,6 +102,8 @@ import {
   syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
 } from "./federation.js";
 import { Permissions, requireGuildPermission } from "./permissions.js";
+
+const execFileAsync = promisify(execFile);
 import {
   endSession,
   getUser,
@@ -1217,6 +1223,7 @@ export function createApp() {
         voiceBitrate: Math.max(24000, Math.min(320000, Number(req.body?.voiceBitrate) || 64000)),
         voiceSampleRate: [8000, 16000, 24000, 32000, 44100, 48000].includes(Number(req.body?.voiceSampleRate)) ? Number(req.body.voiceSampleRate) : 48000,
         position: Number(req.body?.position) || 0,
+        e2eeEnabled: Boolean(req.body?.e2eeEnabled),
       });
       return channel
         ? res.json({ channel })
@@ -1525,6 +1532,47 @@ export function createApp() {
   app.get("/api/v1/assets/:id", (req, res) =>
     sendAsset(uploadsDirectory, req.params.id, res),
   );
+  app.get("/api/v1/media/library", requireUser, (req, res) => {
+    const assets = listMediaAssets().map((asset) => ({
+      id: asset.id,
+      kind: asset.mime_type.startsWith("audio/") ? "audio" : "video",
+      mimeType: asset.mime_type,
+      size: asset.size,
+      title: asset.filename,
+      url: `/api/v1/assets/${asset.id}`,
+      createdAt: asset.created_at,
+    }));
+    res.json({ assets });
+  });
+  app.post("/api/v1/media/import", requireUser, async (req, res, next) => {
+    if (process.env.NODE_ENV !== "development" || process.env.MEDIA_YTDLP_ENABLED !== "true") {
+      return res.status(404).json({ error: "Local media import is disabled" });
+    }
+    const sourceUrl = String(req.body?.url || "").trim();
+    if (!/^https?:\/\//i.test(sourceUrl)) return res.status(400).json({ error: "A valid HTTPS or HTTP media URL is required" });
+    const output = resolve(uploadsDirectory, `${randomUUID()}.%(ext)s`);
+    const configuredYtdlp = process.env.YTDLP_BIN || "yt-dlp";
+    const ytdlpBin = configuredYtdlp === "yt-dlp" || isAbsolute(configuredYtdlp)
+      ? configuredYtdlp
+      : resolve(projectRoot, configuredYtdlp);
+    try {
+      await execFileAsync(ytdlpBin, [
+        "--no-playlist", "--no-warnings", "--no-progress", "--restrict-filenames",
+        "--max-filesize", "200M", "-f", "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b", "--merge-output-format", "mp4",
+        "-o", output, sourceUrl,
+      ], { timeout: 180000, maxBuffer: 1024 * 1024 });
+      const downloaded = output.replace("%(ext)s", "mp4");
+      const buffer = await readFile(downloaded);
+      const asset = storeAsset(uploadsDirectory, { buffer, mimeType: "video/mp4", kind: "media-library", ownerUserId: req.user.id });
+      await unlink(downloaded).catch(() => {});
+      return res.status(201).json({ asset: { id: asset.id, title: sourceUrl, kind: "video", mimeType: "video/mp4", url: `/api/v1/assets/${asset.id}` } });
+    } catch (error) {
+      await unlink(output.replace("%(ext)s", "mp4")).catch(() => {});
+      if (error.code === "ENOENT") return res.status(503).json({ error: `yt-dlp executable not found: ${ytdlpBin}` });
+      if (error.code) return res.status(422).json({ error: String(error.stderr || error.message || "yt-dlp could not import this URL").trim().split("\n").at(-1) });
+      return next(error);
+    }
+  });
   app.get(
     "/api/v1/federation/:peerId/assets/:assetId",
     requireUser,
