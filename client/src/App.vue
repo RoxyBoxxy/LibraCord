@@ -3833,7 +3833,7 @@ watch(
               </article>
             </div>
           </section>
-          <button class="primary">Save instance settings</button>
+          <button class="primary instance-save-button" type="submit">Save instance settings</button>
         </form>
         <div v-else-if="adminTab === 'users'" class="admin-users">
           <article v-for="member in adminUsers" :key="member.id">
@@ -4030,14 +4030,15 @@ watch(
           <span><img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" /><b v-else>{{ guild.name[0] }}</b></span>
           <h3>{{ guild.name }}</h3>
           <p>{{ guild.description }}</p>
+          <code v-if="guild.address" class="community-address" :title="guild.address">{{ guild.address }}</code>
           <button
             v-if="!guild.remote && communities.some((entry) => entry.id === guild.id)"
             @click="chooseGuild(guild)"
           >Open community</button>
           <button v-else-if="guild.remote" :disabled="guild.membership_status === 'pending' || guild.membership_status === 'joined' || guild.profile?.accessMode === 'invite'" @click="joinRemoteCommunity(guild)">
-            {{ guild.membership_status === 'joined' ? 'Joined' : guild.membership_status === 'pending' ? 'Request sent' : guild.profile?.accessMode === 'invite' ? 'Invite only' : `Join ${guild.address || 'community'}` }}
+            {{ guild.membership_status === 'joined' ? 'Joined' : guild.membership_status === 'pending' ? 'Request sent' : guild.profile?.accessMode === 'invite' ? 'Invite only' : 'Join community' }}
           </button>
-          <button v-else-if="guild.profile?.accessMode !== 'invite'" @click="joinCommunityByAddress(guild.address)">Join {{ guild.address }}</button>
+          <button v-else-if="guild.profile?.accessMode !== 'invite'" @click="joinCommunityByAddress(guild.address)">Join community</button>
           <button v-else disabled>Invite only</button>
         </article>
       </div>

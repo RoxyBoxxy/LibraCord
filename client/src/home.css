@@ -222,7 +222,10 @@
 }
 .discovery-grid article,
 .creation-grid article {
+  display: flex;
+  min-width: 0;
   min-height: 190px;
+  flex-direction: column;
   padding: 20px;
   border: 1px solid #80ebf724;
   border-radius: 22px;
@@ -245,19 +248,30 @@
 .discovery-grid article h3,
 .creation-grid h3 {
   margin: 18px 0 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .discovery-grid article p,
 .creation-grid p {
   color: #b4c8cd;
+  overflow-wrap: anywhere;
 }
+.discovery-grid .community-address{display:block;max-width:100%;margin:0 0 14px;overflow:hidden;color:#8795a9;font-size:11px;text-overflow:ellipsis;white-space:nowrap}
 .discovery-grid article button,
 .creation-grid article button {
+  width:100%;
+  min-width:0;
+  margin-top:auto;
   padding: 9px 12px;
   border: 1px solid #73e6ef33;
   border-radius: 11px;
   background: #0b2931ba;
   color: #bffcff;
   cursor: pointer;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
 }
 .creative-market {
   width: 100%;
