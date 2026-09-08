@@ -258,9 +258,28 @@ function deprecatedEndpoint(res, successor) {
 export function createApp() {
   const app = express();
   app.disable("x-powered-by");
+  const configuredClientOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
+    .split(",")
+    .map((value) => value.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+  const allowAnyClientOrigin = configuredClientOrigins.includes("*");
   app.use(
     cors({
-      origin: process.env.CLIENT_ORIGIN || "http://localhost:5173",
+      origin(origin, callback) {
+        // Requests without Origin are same-origin/server-to-server. Wildcard
+        // mode reflects HTTP(S) origins because credentialed CORS responses
+        // are not permitted to use Access-Control-Allow-Origin: *.
+        if (!origin) return callback(null, true);
+        let normalizedOrigin = "";
+        try {
+          const parsed = new URL(origin);
+          if (!["http:", "https:"].includes(parsed.protocol)) return callback(null, false);
+          normalizedOrigin = parsed.origin;
+        } catch {
+          return callback(null, false);
+        }
+        return callback(null, allowAnyClientOrigin || configuredClientOrigins.includes(normalizedOrigin));
+      },
       credentials: true,
     }),
   );

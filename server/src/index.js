@@ -17,6 +17,7 @@ import { moderationEvents } from "./moderation-events.js";
 const port = Number(process.env.PORT || 3002);
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",").map((value) => value.trim()).filter(Boolean);
+const allowAnyClientOrigin = allowedOrigins.includes("*");
 const server = createServer(createApp());
 const io = new Server(server, {
   cors: {
@@ -34,7 +35,7 @@ const io = new Server(server, {
       const explicitlyAllowed = allowedOrigins.some((value) => {
         try { return new URL(value).origin === originUrl.origin; } catch { return false; }
       });
-      return done(null, explicitlyAllowed || originUrl.host === requestHost);
+      return done(null, allowAnyClientOrigin || explicitlyAllowed || originUrl.host === requestHost);
     } catch {
       return done(null, false);
     }
