@@ -251,6 +251,8 @@ export async function processIncomingEnvelope(envelope) {
     else if (envelope.type === "membership.join.request") {
       const community = findCommunity(String(envelope.payload?.community_id || ""));
       if (!community) throw new Error("Community not found");
+      const communityProfile = typeof community.profile === "string" ? JSON.parse(community.profile || "{}") : (community.profile || {});
+      if (communityProfile.accessMode === "invite") throw new Error("This community is invite only");
       const identity = identityFromPayload(envelope.payload, envelope.origin);
       saveRemoteIdentity(identity);
       if (identity.publicKey) saveFederatedDmKey({ globalUserId: identity.globalId, keyId: `identity:${identity.keyFingerprint.slice(0, 24)}`,
@@ -300,6 +302,7 @@ export async function createRemoteJoin(user, address) {
   if (!response.ok) throw new Error(`Remote community lookup returned ${response.status}`);
   const snapshot = (await response.json()).community;
   if (!snapshot?.id) throw new Error("Remote returned an invalid community");
+  if (snapshot.profile?.accessMode === "invite") throw new Error("This community is invite only");
   saveRemoteCommunity(snapshot, destination.toLowerCase(), 0);
   const globalUserId = `${user.id}#${federationDomain()}`;
   const communityGlobalId = snapshot.global_id || `${snapshot.id}#${destination.toLowerCase()}`;

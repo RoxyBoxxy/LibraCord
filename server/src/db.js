@@ -484,10 +484,10 @@ export function saveInstanceSettings(data) {
   db.prepare("UPDATE users SET display_name=? WHERE id=?").run(`${String(data.name || "LibraCord").slice(0, 64)} System`, systemUserId);
   return { ...data, updated_at: updatedAt };
 }
-export function createCommunity({ id, name, description, ownerId }) {
+export function createCommunity({ id, name, description, ownerId, profile = {} }) {
   db.prepare(
-    "INSERT INTO communities(id,name,description,owner_id) VALUES(?,?,?,?)",
-  ).run(id, name, description, ownerId);
+    "INSERT INTO communities(id,name,description,owner_id,profile) VALUES(?,?,?,?,?)",
+  ).run(id, name, description, ownerId, JSON.stringify(profile));
   const community = db.prepare("SELECT * FROM communities WHERE id=?").get(id);
   return { ...community, profile: JSON.parse(community.profile || "{}") };
 }

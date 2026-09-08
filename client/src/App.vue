@@ -160,7 +160,9 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   adminUsers = ref([]),
   adminModeration = ref({ bans: [], reports: [], actions: [], system_user: null }),
   guildDialog = ref(false),
-  newGuild = ref({ name: "", description: "" }),
+  guildWizardStep = ref("choose"),
+  joinCommunityAddress = ref(""),
+  newGuild = ref({ name: "", description: "", accessMode: "open" }),
   guildSettingsDialog = ref(false),
   communityBackgroundFile = ref(null),
   communityIconFile = ref(null),
@@ -1813,11 +1815,30 @@ async function createGuild() {
       await api(`/api/v1/guilds/${result.guild.id}/members`)
     ).members;
     guildDialog.value = false;
-    newGuild.value = { name: "", description: "" };
+    guildWizardStep.value = "choose";
+    newGuild.value = { name: "", description: "", accessMode: "open" };
     await selectChannel(result.guild.channels[0]);
   } catch (e) {
     error.value = e.message;
   }
+}
+async function joinCommunityByAddress(requestedAddress = "") {
+  error.value = "";
+  try {
+    const address = String(typeof requestedAddress === "string" && requestedAddress ? requestedAddress : joinCommunityAddress.value).trim().toLowerCase();
+    const result = await api("/api/v1/communities/join", {
+      method: "POST",
+      body: JSON.stringify({ address }),
+    });
+    communities.value = (await api("/api/v1/guilds")).guilds || [];
+    guildDialog.value = false;
+    guildWizardStep.value = "choose";
+    const joined = communities.value.find((guild) => guild.id === result.guild_id || guild.address === address);
+    if (joined && result.status === "joined") await chooseGuild(joined);
+    else saved.value = "Join request sent. The community will appear when its server accepts it.";
+    joinCommunityAddress.value = "";
+    return true;
+  } catch (e) { error.value = e.message; return false; }
 }
 async function chooseGuild(guild) {
   communityMenuOpen.value = false;
@@ -1945,16 +1966,7 @@ async function joinFromInvite() {
   if (joined) await chooseGuild(joined);
 }
 async function joinRemoteCommunity(guild) {
-  error.value = "";
-  try {
-    await api("/api/v1/federation/memberships", {
-      method: "POST",
-      body: JSON.stringify({ address: guild.address }),
-    });
-    guild.membership_status = "pending";
-  } catch (e) {
-    error.value = e.message;
-  }
+  if (await joinCommunityByAddress(guild.address)) guild.membership_status = "pending";
 }
 async function removeCommunityMember(member) {
   if (!confirm(`Remove ${member.display_name} from this community?`)) return;
@@ -2261,6 +2273,7 @@ async function openGuildSettings(tab = "overview") {
       bannerColor: activeCommunity.value.profile?.bannerColor || "#7857ff",
       memberTag: activeCommunity.value.profile?.memberTag || "",
       memberTagEmoji: activeCommunity.value.profile?.memberTagEmoji || "",
+      accessMode: activeCommunity.value.profile?.accessMode === "invite" ? "invite" : "open",
       traits: [
         ...(activeCommunity.value.profile?.traits || []),
         "",
@@ -3105,12 +3118,12 @@ watch(
           <strong>{{ activeCommunity?.name || "Choose community" }}</strong><b>⌄</b>
         </button>
         <div v-if="communityMenuOpen" class="community-menu">
-          <button v-for="guild in communities" :key="guild.id" :class="{ active: activeCommunity?.id === guild.id, unread: unreadCommunities[guild.id], 'has-community-banner': guild.banner_url }" :style="guild.banner_url ? { '--community-menu-banner': `url(${guild.banner_url})` } : {}" @click="chooseGuild(guild)">
+          <button v-for="guild in communities" :key="guild.id" :class="{ active: activeCommunity?.id === guild.id, unread: unreadCommunities[guild.id], 'has-community-banner': guild.banner_url }" :style="guild.banner_url ? { '--community-menu-banner': `url(${apiEndpoint(guild.banner_url)})` } : {}" @click="chooseGuild(guild)">
             <span class="community-menu-icon"><img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" /><b v-else>{{ guild.name[0].toUpperCase() }}</b></span><strong>{{ guild.name }}</strong><small>{{ guild.description || "Community" }}</small>
             <i v-if="unreadCommunities[guild.id]" class="unread-badge">!</i>
           </button>
-          <button class="community-create" @click="communityMenuOpen = false; guildDialog = true">
-            <span>＋</span><strong>Create community</strong><small>Start a new space</small>
+          <button class="community-create" @click="communityMenuOpen = false; guildWizardStep = 'choose'; guildDialog = true">
+            <span>＋</span><strong>Add a community</strong><small>Create or join a space</small>
           </button>
         </div>
       </div>
@@ -3125,8 +3138,8 @@ watch(
       <div class="community-actions">
         <button
           class="server add"
-          title="Create community"
-          @click="guildDialog = true"
+          title="Add community"
+          @click="guildWizardStep = 'choose'; guildDialog = true"
         >
           <FontAwesomeIcon :icon="faPlus" />
         </button>
@@ -4007,19 +4020,20 @@ watch(
         <article
           v-for="guild in discoverCommunities"
           :key="guild.id"
-          :style="atmosphereStyle(guild.profile?.atmosphere)"
+          :style="guild.banner_url ? { backgroundImage: `linear-gradient(180deg, #07131e35, #07131ef5), url(${apiEndpoint(guild.banner_url)})` } : atmosphereStyle(guild.profile?.atmosphere)"
         >
-          <span>{{ guild.name[0] }}</span>
+          <span><img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" /><b v-else>{{ guild.name[0] }}</b></span>
           <h3>{{ guild.name }}</h3>
           <p>{{ guild.description }}</p>
           <button
             v-if="!guild.remote && communities.some((entry) => entry.id === guild.id)"
             @click="chooseGuild(guild)"
           >Open community</button>
-          <button v-else-if="guild.remote" :disabled="guild.membership_status === 'pending' || guild.membership_status === 'joined'" @click="joinRemoteCommunity(guild)">
-            {{ guild.membership_status === 'joined' ? 'Joined' : guild.membership_status === 'pending' ? 'Request sent' : `Join ${guild.address || 'community'}` }}
+          <button v-else-if="guild.remote" :disabled="guild.membership_status === 'pending' || guild.membership_status === 'joined' || guild.profile?.accessMode === 'invite'" @click="joinRemoteCommunity(guild)">
+            {{ guild.membership_status === 'joined' ? 'Joined' : guild.membership_status === 'pending' ? 'Request sent' : guild.profile?.accessMode === 'invite' ? 'Invite only' : `Join ${guild.address || 'community'}` }}
           </button>
-          <button v-else disabled>Invite required</button>
+          <button v-else-if="guild.profile?.accessMode !== 'invite'" @click="joinCommunityByAddress(guild.address)">Join {{ guild.address }}</button>
+          <button v-else disabled>Invite only</button>
         </article>
       </div>
       <div v-else class="creative-market">
@@ -4273,11 +4287,19 @@ watch(
       class="dialog-layer"
       @click.self="guildDialog = false"
     >
-      <form class="dialog-card" @submit.prevent="createGuild">
-        <h2>Create a server</h2>
-        <p>
-          Servers are independent communities hosted on {{ user.home_server }}.
-        </p>
+      <section v-if="guildWizardStep === 'choose'" class="dialog-card community-wizard">
+        <h2>Add a community</h2>
+        <p>Create a new home here, or join one using its portable address.</p>
+        <div class="community-wizard-choices">
+          <button type="button" @click="guildWizardStep = 'create'"><b>＋</b><strong>Create a community</strong><small>Start a space on {{ user.home_server }}</small></button>
+          <button type="button" @click="guildWizardStep = 'join'"><b>#</b><strong>Join a community</strong><small>Use servername#homeserver</small></button>
+        </div>
+        <div><button type="button" @click="guildDialog = false">Cancel</button></div>
+      </section>
+      <form v-else-if="guildWizardStep === 'create'" class="dialog-card community-wizard" @submit.prevent="createGuild">
+        <button type="button" class="wizard-back" @click="guildWizardStep = 'choose'">← Back</button>
+        <h2>Create a community</h2>
+        <p>Its icon and banner can be uploaded from Server Profile after creation.</p>
         <label
           >Name<input v-model="newGuild.name" maxlength="80" required /></label
         ><label
@@ -4287,10 +4309,18 @@ watch(
             rows="4"
           ></textarea>
         </label>
+        <label>Access<select v-model="newGuild.accessMode"><option value="open">Open — anyone with its address can join</option><option value="invite">Private — invite only</option></select></label>
         <div>
           <button type="button" @click="guildDialog = false">Cancel</button
           ><button class="primary">Create server</button>
         </div>
+      </form>
+      <form v-else class="dialog-card community-wizard" @submit.prevent="joinCommunityByAddress">
+        <button type="button" class="wizard-back" @click="guildWizardStep = 'choose'">← Back</button>
+        <h2>Join a community</h2>
+        <p>Enter the community name followed by its home server.</p>
+        <label>Community address<input v-model.trim="joinCommunityAddress" required placeholder="woof#chat.example.com" /></label>
+        <div><button type="button" @click="guildDialog = false">Cancel</button><button class="primary">Join community</button></div>
       </form>
     </div>
     <div
@@ -4592,6 +4622,11 @@ watch(
                 <label>Tag emoji<input v-model="guildForm.profile.memberTagEmoji" maxlength="16" placeholder="🌌" /></label>
               </div>
               <p class="upload-help">This community badge appears beside member usernames throughout LibraCord.</p>
+              <div class="profile-divider">
+                <h3>Community access</h3>
+                <label>Who can join<select v-model="guildForm.profile.accessMode"><option value="open">Open — anyone with the community address</option><option value="invite">Private — invite only</option></select></label>
+                <p class="upload-help">Invites always work. Private communities reject direct local and federated join requests.</p>
+              </div>
               <div class="profile-divider">
                 <h3>Icon</h3>
                 <p>We recommend a square image of at least 512×512.</p>

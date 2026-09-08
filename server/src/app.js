@@ -956,6 +956,7 @@ export function createApp() {
       name,
       description,
       ownerId: req.user.id,
+      profile: { accessMode: req.body?.accessMode === "invite" ? "invite" : "open" },
     });
     initializeGuildAccess(guild.id, req.user.id, randomUUID());
     const general = createChannel({
@@ -988,6 +989,7 @@ export function createApp() {
           : {},
       inputProfile = req.body?.profile || oldProfile,
       profile = {
+        accessMode: inputProfile.accessMode === "invite" ? "invite" : "open",
         bannerColor: /^#[0-9a-f]{6}$/i.test(inputProfile.bannerColor)
           ? inputProfile.bannerColor
           : "#7857ff",
@@ -1051,6 +1053,25 @@ export function createApp() {
         profile,
       }),
     });
+  });
+  app.post("/api/v1/communities/join", requireUser, async (req, res) => {
+    const address = String(req.body?.address || "").trim().toLowerCase();
+    const match = address.match(/^([^#]+)#([^#]+)$/);
+    if (!match) return res.status(400).json({ error: "Use a community address such as woof#chat.example.com" });
+    const [, reference, destination] = match;
+    const localDomain = String(process.env.FEDERATION_DOMAIN || req.get("host")).toLowerCase();
+    if (destination !== localDomain && destination !== String(req.get("host") || "").toLowerCase()) {
+      try {
+        const event = await createRemoteJoin(req.user, address);
+        return res.status(202).json({ status: "pending", event_id: event.event_id, remote: true });
+      } catch (error) { return res.status(400).json({ error: error.message }); }
+    }
+    const community = findCommunityByReference(reference);
+    if (!community) return res.status(404).json({ error: "Community not found" });
+    const profile = typeof community.profile === "string" ? JSON.parse(community.profile || "{}") : (community.profile || {});
+    if (profile.accessMode === "invite") return res.status(403).json({ error: "This community is invite only" });
+    ensureGuildMember(community.id, req.user.id);
+    return res.json({ status: "joined", guild_id: community.id });
   });
   app.post(
     "/api/v1/guilds/:id/background",
