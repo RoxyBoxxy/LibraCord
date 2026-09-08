@@ -44,6 +44,8 @@ This design remains experimental. It does not establish an audited end-to-end se
 
 The server still observes sender, recipient, timestamps, IP/session metadata, and message frequency. Voice/video through LiveKit is transport encrypted but processed/routed by the LiveKit infrastructure; it is not equivalent to a verified end-to-end group protocol.
 
+Instance moderation messages are a separate, explicitly marked system-message class. They are not end-to-end encrypted because the instance itself is the sender. LibraCord shows them as read-only messages from the instance system identity, while the initiating moderator is retained only in the private audit log.
+
 ## Federation authenticity
 
 Federation envelopes are signed with persistent Ed25519 instance keys, addressed to one destination, timestamp bounded, sequence ordered, and idempotently stored by event ID. Replicas live outside authoritative local tables. These controls authenticate an allowlisted instance; they do not prove that its administrator or users are trustworthy. Peer trust scores and abuse reports support policy decisions but must not be presented as objective reputation.

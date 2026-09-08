@@ -46,6 +46,9 @@ db.exec(`
  CREATE TABLE IF NOT EXISTS identity_migrations(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,source_global_id TEXT NOT NULL,target_domain TEXT NOT NULL,bundle TEXT NOT NULL,secret_hash TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'created',expires_at TEXT NOT NULL,created_at TEXT NOT NULL,completed_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS guild_bans(guild_id TEXT NOT NULL,actor_global_id TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',moderator_id TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(guild_id,actor_global_id));
  CREATE TABLE IF NOT EXISTS moderation_actions(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,action TEXT NOT NULL,target_global_id TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',moderator_id TEXT NOT NULL,metadata TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS instance_bans(user_id TEXT PRIMARY KEY,reason TEXT NOT NULL DEFAULT '',moderator_id TEXT NOT NULL,created_at TEXT NOT NULL,expires_at TEXT,revoked_at TEXT,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS instance_reports(id TEXT PRIMARY KEY,reporter_id TEXT NOT NULL,target_type TEXT NOT NULL CHECK(target_type IN ('user','message','community','peer')),target_id TEXT NOT NULL,category TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',evidence TEXT NOT NULL DEFAULT '{}',status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','reviewing','actioned','dismissed')),reviewer_id TEXT,resolution TEXT NOT NULL DEFAULT '',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(reporter_id) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS instance_moderation_actions(id TEXT PRIMARY KEY,action TEXT NOT NULL,target_user_id TEXT,moderator_id TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',metadata TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL);
 `);
 for (const [name, definition] of [
   ["federation_domain", "TEXT NOT NULL DEFAULT ''"],
@@ -58,6 +61,10 @@ for (const [name, definition] of [
 for (const [name, definition] of [["attachments", "TEXT NOT NULL DEFAULT '[]'"], ["content_warning", "TEXT NOT NULL DEFAULT ''"], ["reply_to", "INTEGER"]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
+}
+for (const [name, definition] of [["kind", "TEXT NOT NULL DEFAULT 'user'"], ["metadata", "TEXT NOT NULL DEFAULT '{}'" ]]) {
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('direct_messages') WHERE name=?").get(name))
+    db.exec(`ALTER TABLE direct_messages ADD COLUMN ${name} ${definition}`);
 }
 // Keep upgrades compatible with databases created by earlier LibraCord versions.
 if (
@@ -182,6 +189,14 @@ if (!db.prepare("SELECT id FROM instance_settings WHERE id=1").get())
     }),
     new Date().toISOString(),
   );
+const systemUserId = "00000000-0000-4000-8000-000000000001";
+const systemDisplayName = `${String(getInstanceSettings().name || "LibraCord").slice(0, 64)} System`;
+if (!db.prepare("SELECT id FROM users WHERE id=?").get(systemUserId))
+  db.prepare(`INSERT INTO users(id,email,username,display_name,password_hash,role,created_at,settings,bio,accent_color)
+    VALUES(?,?,?,?,?,'member',?,?,?,?)`).run(systemUserId, "system@internal.invalid", "libracord-system-00000001", systemDisplayName,
+      "disabled", new Date().toISOString(), JSON.stringify({ system: true, status: "online", statusText: "Official instance message" }),
+      "Official messages from this LibraCord instance.", "#62efc6");
+else db.prepare("UPDATE users SET display_name=? WHERE id=?").run(systemDisplayName, systemUserId);
 for (const guild of db.prepare("SELECT id FROM communities").all()) {
   if (
     !db
@@ -292,7 +307,7 @@ export function createMessage({ channelId, authorId, authorName, body, attachmen
 }
 
 export function countUsers() {
-  return db.prepare("SELECT COUNT(*) AS count FROM users").get().count;
+  return db.prepare("SELECT COUNT(*) AS count FROM users WHERE id<>'00000000-0000-4000-8000-000000000001'").get().count;
 }
 export function createUser({
   id,
@@ -320,7 +335,16 @@ export function createUser({
   };
 }
 export function findUserByEmail(email) {
+  releaseExpiredInstanceBans();
   return db.prepare("SELECT * FROM users WHERE email=?").get(email);
+}
+function releaseExpiredInstanceBans() {
+  const now = new Date().toISOString();
+  const expired = db.prepare("SELECT user_id FROM instance_bans WHERE revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?").all(now);
+  for (const ban of expired) {
+    db.prepare("UPDATE instance_bans SET revoked_at=? WHERE user_id=?").run(now, ban.user_id);
+    db.prepare("UPDATE users SET suspended=0 WHERE id=?").run(ban.user_id);
+  }
 }
 export function findUserByUsername(username) {
   return db
@@ -457,6 +481,7 @@ export function saveInstanceSettings(data) {
     JSON.stringify(data),
     updatedAt,
   );
+  db.prepare("UPDATE users SET display_name=? WHERE id=?").run(`${String(data.name || "LibraCord").slice(0, 64)} System`, systemUserId);
   return { ...data, updated_at: updatedAt };
 }
 export function createCommunity({ id, name, description, ownerId }) {
@@ -527,14 +552,16 @@ export function createChannel({ id, communityId, name, kind, position = 0 }) {
 export function listUsers() {
   return db
     .prepare(
-      "SELECT id,email,username,display_name,role,suspended,created_at FROM users ORDER BY created_at",
+      "SELECT id,email,username,display_name,role,suspended,created_at FROM users WHERE id<>'00000000-0000-4000-8000-000000000001' ORDER BY created_at",
     )
     .all();
 }
 export function setUserAdministration(id, { role, suspended }) {
   db.prepare(
-    "UPDATE users SET role=?,suspended=? WHERE id=? AND role<>'owner'",
-  ).run(role, suspended ? 1 : 0, id);
+    `UPDATE users SET role=?,suspended=CASE WHEN EXISTS(
+      SELECT 1 FROM instance_bans WHERE user_id=? AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at>?)
+    ) THEN 1 ELSE ? END WHERE id=? AND role<>'owner'`,
+  ).run(role, id, new Date().toISOString(), suspended ? 1 : 0, id);
   return db
     .prepare(
       "SELECT id,email,username,display_name,role,suspended,created_at FROM users WHERE id=?",
@@ -1205,15 +1232,105 @@ export function ensureGuildMember(guildId, userId) {
   db.prepare("INSERT OR IGNORE INTO guild_members(guild_id,user_id,nickname,joined_at) VALUES(?,?,NULL,?)").run(guildId, userId, new Date().toISOString());
 }
 export function listDirectMessages(userId, otherUserId) {
-  return db.prepare(`SELECT m.*,u.display_name AS author_name,u.username,u.avatar_url
+  return db.prepare(`SELECT m.*,u.display_name AS author_name,u.username,u.avatar_url,u.banner_url
     FROM direct_messages m JOIN users u ON u.id=m.sender_id
     WHERE (m.sender_id=? AND m.recipient_id=?) OR (m.sender_id=? AND m.recipient_id=?)
-    ORDER BY m.created_at`).all(userId, otherUserId, otherUserId, userId);
+    ORDER BY m.created_at`).all(userId, otherUserId, otherUserId, userId)
+    .map((message) => ({ ...message, metadata: JSON.parse(message.metadata || "{}") }));
 }
-export function createDirectMessage(senderId, recipientId, body) {
+export function createDirectMessage(senderId, recipientId, body, { kind = "user", metadata = {} } = {}) {
   const createdAt = new Date().toISOString();
-  const result = db.prepare("INSERT INTO direct_messages(sender_id,recipient_id,body,created_at) VALUES(?,?,?,?)").run(senderId, recipientId, body, createdAt);
-  return db.prepare(`SELECT m.*,u.display_name AS author_name,u.username,u.avatar_url FROM direct_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?`).get(result.lastInsertRowid);
+  const result = db.prepare("INSERT INTO direct_messages(sender_id,recipient_id,body,created_at,kind,metadata) VALUES(?,?,?,?,?,?)")
+    .run(senderId, recipientId, body, createdAt, kind, JSON.stringify(metadata));
+  const message = db.prepare(`SELECT m.*,u.display_name AS author_name,u.username,u.avatar_url,u.banner_url FROM direct_messages m JOIN users u ON u.id=m.sender_id WHERE m.id=?`).get(result.lastInsertRowid);
+  return { ...message, metadata: JSON.parse(message.metadata || "{}") };
+}
+export function listDirectMessageContacts(userId) {
+  return db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,u.settings,
+    MAX(m.created_at) AS last_message_at
+    FROM direct_messages m JOIN users u ON u.id=CASE WHEN m.sender_id=? THEN m.recipient_id ELSE m.sender_id END
+    WHERE m.sender_id=? OR m.recipient_id=? GROUP BY u.id ORDER BY last_message_at DESC`).all(userId, userId, userId)
+    .map((user) => {
+      const settings = JSON.parse(user.settings || "{}");
+      return { ...user, settings: undefined, status_text: settings.statusText || "", system: Boolean(settings.system) };
+    });
+}
+export function getSystemUser() {
+  return findPublicUser(systemUserId);
+}
+export function createSystemDirectMessage(recipientId, body, moderatorId, subject = "Instance moderation") {
+  if (!findPublicUser(recipientId) || recipientId === systemUserId) throw new Error("Recipient not found");
+  const message = createDirectMessage(systemUserId, recipientId, body, { kind: "system", metadata: { subject } });
+  db.prepare("INSERT INTO instance_moderation_actions VALUES(?,?,?,?,?,?,?)")
+    .run(randomUUID(), "system_message", recipientId, moderatorId, subject, JSON.stringify({ message_id: message.id }), message.created_at);
+  return message;
+}
+export function banInstanceUser(userId, reason, moderatorId, expiresAt = null) {
+  const target = db.prepare("SELECT id,role FROM users WHERE id=?").get(userId);
+  if (!target || target.role === "owner" || userId === systemUserId) return null;
+  const now = new Date().toISOString();
+  db.exec("BEGIN");
+  try {
+    db.prepare(`INSERT INTO instance_bans(user_id,reason,moderator_id,created_at,expires_at,revoked_at) VALUES(?,?,?,?,?,NULL)
+      ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason,moderator_id=excluded.moderator_id,created_at=excluded.created_at,expires_at=excluded.expires_at,revoked_at=NULL`)
+      .run(userId, reason, moderatorId, now, expiresAt);
+    db.prepare("UPDATE users SET suspended=1 WHERE id=?").run(userId);
+    db.prepare("DELETE FROM sessions WHERE user_id=?").run(userId);
+    db.prepare("INSERT INTO instance_moderation_actions VALUES(?,?,?,?,?,?,?)")
+      .run(randomUUID(), "ban", userId, moderatorId, reason, JSON.stringify({ expires_at: expiresAt }), now);
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return db.prepare("SELECT * FROM instance_bans WHERE user_id=?").get(userId);
+}
+export function unbanInstanceUser(userId, moderatorId) {
+  const ban = db.prepare("SELECT * FROM instance_bans WHERE user_id=? AND revoked_at IS NULL").get(userId);
+  if (!ban) return false;
+  const now = new Date().toISOString();
+  db.exec("BEGIN");
+  try {
+    db.prepare("UPDATE instance_bans SET revoked_at=? WHERE user_id=?").run(now, userId);
+    db.prepare("UPDATE users SET suspended=0 WHERE id=?").run(userId);
+    db.prepare("INSERT INTO instance_moderation_actions VALUES(?,?,?,?,?,?,?)")
+      .run(randomUUID(), "unban", userId, moderatorId, "", "{}", now);
+    db.exec("COMMIT");
+    return true;
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+}
+export function listInstanceBans() {
+  return db.prepare(`SELECT b.*,u.username,u.display_name,m.display_name AS moderator_name FROM instance_bans b
+    JOIN users u ON u.id=b.user_id LEFT JOIN users m ON m.id=b.moderator_id WHERE b.revoked_at IS NULL ORDER BY b.created_at DESC`).all();
+}
+export function createInstanceReport(value) {
+  const now = new Date().toISOString(), id = randomUUID();
+  db.prepare(`INSERT INTO instance_reports(id,reporter_id,target_type,target_id,category,description,evidence,status,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,'open',?,?)`).run(id, value.reporterId, value.targetType, value.targetId, value.category,
+      value.description, JSON.stringify(value.evidence || {}), now, now);
+  return getInstanceReport(id);
+}
+export function getInstanceReport(id) {
+  const row = db.prepare(`SELECT r.*,reporter.display_name AS reporter_name,reviewer.display_name AS reviewer_name
+    FROM instance_reports r JOIN users reporter ON reporter.id=r.reporter_id LEFT JOIN users reviewer ON reviewer.id=r.reviewer_id WHERE r.id=?`).get(id);
+  return row ? { ...row, evidence: JSON.parse(row.evidence || "{}") } : null;
+}
+export function listInstanceReports() {
+  return db.prepare(`SELECT r.*,reporter.display_name AS reporter_name,reviewer.display_name AS reviewer_name
+    FROM instance_reports r JOIN users reporter ON reporter.id=r.reporter_id LEFT JOIN users reviewer ON reviewer.id=r.reviewer_id ORDER BY r.created_at DESC`).all()
+    .map((row) => ({ ...row, evidence: JSON.parse(row.evidence || "{}") }));
+}
+export function updateInstanceReport(id, status, resolution, reviewerId) {
+  const now = new Date().toISOString();
+  const changed = db.prepare("UPDATE instance_reports SET status=?,resolution=?,reviewer_id=?,updated_at=? WHERE id=?")
+    .run(status, resolution, reviewerId, now, id).changes;
+  if (!changed) return null;
+  db.prepare("INSERT INTO instance_moderation_actions VALUES(?,?,?,?,?,?,?)")
+    .run(randomUUID(), `report.${status}`, null, reviewerId, resolution, JSON.stringify({ report_id: id }), now);
+  return getInstanceReport(id);
+}
+export function listInstanceModerationActions() {
+  return db.prepare(`SELECT a.*,target.display_name AS target_name,moderator.display_name AS moderator_name
+    FROM instance_moderation_actions a LEFT JOIN users target ON target.id=a.target_user_id
+    LEFT JOIN users moderator ON moderator.id=a.moderator_id ORDER BY a.created_at DESC LIMIT 1000`).all()
+    .map((row) => ({ ...row, metadata: JSON.parse(row.metadata || "{}") }));
 }
 
 // Federation persistence deliberately exposes protocol-shaped operations rather

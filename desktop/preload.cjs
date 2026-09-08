@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('libracordDesktop', {
   maximize: () => ipcRenderer.send('window:maximize'),
   close: () => ipcRenderer.send('window:close'),
   getLaunchConfig: () => ipcRenderer.invoke('desktop:get-launch-config'),
+  trustOrigin: (origin) => ipcRenderer.invoke('desktop:trust-origin', origin),
   getDisplaySources: () => ipcRenderer.invoke('desktop:get-sources'),
   setDisplaySource: (sourceId) => ipcRenderer.invoke('desktop:set-display-source', sourceId),
   logout: () => {

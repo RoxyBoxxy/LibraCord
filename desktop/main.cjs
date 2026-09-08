@@ -8,7 +8,12 @@ let configuredPublicOrigin = '';
 try { configuredPublicOrigin = new URL(process.env.PUBLIC_URL || '').origin; } catch {}
 const publicIsLocal = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(configuredPublicOrigin);
 const defaultHomeServer = process.env.DESKTOP_HOME_SERVER || (configuredPublicOrigin && !publicIsLocal ? configuredPublicOrigin : localAppOrigin);
-const desktopClientOrigin = process.env.DESKTOP_CLIENT_URL || defaultHomeServer;
+// Without an explicit desktop client URL, load the UI from the instance the
+// user selects instead of silently returning to the default production host.
+const desktopClientOrigin = process.env.DESKTOP_CLIENT_URL || '';
+// The selected instance serves the desktop UI. Disable Chromium's HTTP cache
+// so a redeployed instance cannot leave this client on an obsolete bundle.
+app.commandLine.appendSwitch('disable-http-cache');
 const trustedDesktopOrigins = new Set();
 for (const candidate of [defaultHomeServer, desktopClientOrigin]) {
   try { trustedDesktopOrigins.add(new URL(candidate).origin); } catch {}
@@ -67,6 +72,14 @@ ipcMain.handle('desktop:get-launch-config', () => ({
   defaultHomeServer,
   clientOrigin: desktopClientOrigin,
 }));
+ipcMain.handle('desktop:trust-origin', (_event, value) => {
+  try {
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    trustedDesktopOrigins.add(parsed.origin);
+    return true;
+  } catch { return false; }
+});
 ipcMain.handle('desktop:get-sources', async () => {
   return displaySourcesCache.length ? displaySourcesCache : refreshDisplaySources();
 });
@@ -74,7 +87,13 @@ ipcMain.handle('desktop:set-display-source', (_event, sourceId) => {
   selectedDisplaySourceId = typeof sourceId === 'string' ? sourceId : null;
   return true;
 });
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  // Preserve cookies, localStorage and desktop preferences while removing the
+  // caches capable of serving an old frontend.
+  await Promise.allSettled([
+    session.defaultSession.clearCache(),
+    session.defaultSession.clearStorageData({ storages: ['serviceworkers', 'cachestorage'] }),
+  ]);
   // Remote pages must be explicitly scoped before they can access privileged
   // desktop capabilities. Both handlers are needed because Chromium may check
   // a permission without subsequently raising a permission request.

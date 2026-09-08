@@ -23,4 +23,5 @@ import "./design-v2.css";
 import "./home.css";
 import "./cosmetics.css";
 import "./mini-decoration.css";
+import "./design-v3.css";
 createApp(App).mount("#app");

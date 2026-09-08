@@ -442,3 +442,4 @@
 .crop-zoom { display:flex; align-items:center; gap:12px; margin:18px 0; color:#c9e2ea; }
 .crop-zoom input { flex:1; accent-color:#62efc6; }
 .image-crop-actions { display:flex; justify-content:flex-end; gap:10px; }
+.system-badge{display:inline-flex;padding:2px 5px;border-radius:4px;background:#62efc6;color:#07151a;font-size:9px;font-weight:900;vertical-align:middle}.dm-messages .system-message{border-left:3px solid #62efc6;background:linear-gradient(90deg,#62efc610,transparent)}.dm-system-notice{flex:0 0 auto;margin:10px 14px;padding:12px;border:1px solid #2f5260;border-radius:10px;background:#0b2028;color:#9bded8;text-align:center;font-size:13px}

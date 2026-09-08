@@ -44,6 +44,10 @@ The server derives the sender identity from the authenticated socket. It must no
 | `dm:typing` | `{ userId, name, typing }` | Render private typing status |
 | `dm:call-invite` | caller/call metadata | Open the incoming-call dialog |
 | `dm:call-response` | responder/call metadata | Join or end the pending call flow |
+| `moderation:report-created` | `{ reportId }` | Tell connected instance moderators to refresh reports |
+| `account:banned` | `{ reason }` | Inform the affected client before its sockets are disconnected |
+
+System-authored moderation DMs use the ordinary `dm:created` event with `kind: "system"`. Clients should show the system badge and treat that conversation as read-only.
 
 ## Reconnect behavior
 

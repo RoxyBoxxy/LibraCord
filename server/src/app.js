@@ -84,10 +84,14 @@ import {
   communityFederationSnapshot,
   findPeerByDomain, saveRemoteIdentity,
   findCommunityByReference, listGuildBans, banGuildActor, unbanGuildActor, listModerationActions,
+  listDirectMessageContacts, getSystemUser, createSystemDirectMessage,
+  banInstanceUser, unbanInstanceUser, listInstanceBans, createInstanceReport,
+  listInstanceReports, updateInstanceReport, listInstanceModerationActions,
 } from "./db.js";
 import { proxyAsset, sendAsset, storeAsset } from "./assets.js";
 import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js";
 import { checkBrowserNavigation } from "./plugins/browser-policy.js";
+import { moderationEvents } from "./moderation-events.js";
 import {
   canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope,
   publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
@@ -120,6 +124,22 @@ const upload = multer({
       ? done(null, true)
       : done(new Error("Only PNG, JPG, and GIF images are supported")),
 });
+const allowedMessageFiles = new Set([
+  ...allowedImages.keys(),
+  "image/webp", "audio/mpeg", "audio/ogg", "audio/wav", "video/mp4", "video/webm",
+  "application/pdf", "application/json", "application/zip", "application/x-7z-compressed",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "text/plain", "text/csv", "text/markdown",
+]);
+const messageFileUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 32 * 1024 * 1024, files: 1 },
+  fileFilter: (_req, file, done) => allowedMessageFiles.has(file.mimetype)
+    ? done(null, true)
+    : done(new Error("That file type is not supported")),
+});
 function detectedImageExtension(buffer) {
   if (
     buffer
@@ -143,7 +163,12 @@ const homeServer =
       return "localhost";
     }
   })();
-const livekitPublicUrl = process.env.LIVEKIT_URL || "ws://localhost:7880";
+// In local development the container's HTTP port may be remapped to avoid a
+// collision on 7880. Keep the browser URL aligned with that published port
+// when an explicit public LiveKit URL has not been supplied.
+const livekitPublicUrl =
+  process.env.LIVEKIT_URL ||
+  `ws://localhost:${process.env.LIVEKIT_HTTP_PORT || 7880}`;
 const livekitInternalUrl = process.env.LIVEKIT_INTERNAL_URL || livekitPublicUrl;
 const federatedAssetUrl = (value) => value ? new URL(value, `${String(process.env.PUBLIC_URL || `http://${homeServer}`).replace(/\/$/, "")}/`).href : "";
 const publicUser = (user) => ({
@@ -224,6 +249,10 @@ function peerInput(body) {
   )
     return null;
   return { name, baseUrl: url.origin, status };
+}
+function deprecatedEndpoint(res, successor) {
+  res.set("deprecation", "true");
+  res.set("link", `<${successor}>; rel=\"successor-version\"`);
 }
 
 export function createApp() {
@@ -335,6 +364,8 @@ export function createApp() {
         user = findUserByEmail(email);
       if (!user || !(await verifyPassword(password, user.password_hash)))
         return res.status(401).json({ error: "Invalid email or password" });
+      if (user.suspended)
+        return res.status(403).json({ error: "This account has been suspended or banned" });
       startSession(res, user.id);
       res.json({ user: publicUser(user) });
     } catch (error) {
@@ -839,6 +870,39 @@ export function createApp() {
       ? res.json({ user: updated })
       : res.status(404).json({ error: "User not found" });
   });
+  app.get("/api/v1/admin/moderation", requireAdmin, (_req, res) =>
+    res.json({ bans: listInstanceBans(), reports: listInstanceReports(), actions: listInstanceModerationActions(), system_user: publicProfile(getSystemUser()) }));
+  app.post("/api/v1/admin/moderation/users/:id/ban", requireAdmin, (req, res) => {
+    const target = findPublicUser(req.params.id), reason = String(req.body?.reason || "").trim().slice(0, 1000);
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.role === "owner" || (target.role === "admin" && req.user.role !== "owner"))
+      return res.status(403).json({ error: "Only the instance owner can moderate administrators, and the owner cannot be banned" });
+    if (!reason) return res.status(400).json({ error: "A ban reason is required" });
+    const expiresAt = req.body?.expiresAt ? new Date(req.body.expiresAt) : null;
+    if (expiresAt && (!Number.isFinite(expiresAt.getTime()) || expiresAt <= new Date()))
+      return res.status(400).json({ error: "Ban expiry must be a future date" });
+    const ban = banInstanceUser(target.id, reason, req.user.id, expiresAt?.toISOString() || null);
+    if (!ban) return res.status(403).json({ error: "That account cannot be banned" });
+    moderationEvents.emit("account:banned", { userId: target.id, reason });
+    return res.status(201).json({ ban });
+  });
+  app.delete("/api/v1/admin/moderation/users/:id/ban", requireAdmin, (req, res) =>
+    unbanInstanceUser(req.params.id, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Active ban not found" }));
+  app.post("/api/v1/admin/moderation/users/:id/message", requireAdmin, (req, res) => {
+    const body = String(req.body?.body || "").trim().slice(0, 12000), subject = String(req.body?.subject || "Instance moderation").trim().slice(0, 120);
+    if (!body) return res.status(400).json({ error: "A message is required" });
+    try {
+      const message = createSystemDirectMessage(req.params.id, body, req.user.id, subject || "Instance moderation");
+      moderationEvents.emit("system-message", { recipientId: req.params.id, message });
+      return res.status(201).json({ message });
+    } catch (error) { return res.status(404).json({ error: error.message }); }
+  });
+  app.patch("/api/v1/admin/moderation/reports/:id", requireAdmin, (req, res) => {
+    const status = ["open", "reviewing", "actioned", "dismissed"].includes(req.body?.status) ? req.body.status : null;
+    if (!status) return res.status(400).json({ error: "Invalid report status" });
+    const report = updateInstanceReport(req.params.id, status, String(req.body?.resolution || "").slice(0, 2000), req.user.id);
+    return report ? res.json({ report }) : res.status(404).json({ error: "Report not found" });
+  });
   const remoteGuildsFor = (userId) => listRemoteCommunitiesForUser(`${userId}#${federationDomain()}`).map((remote) => ({
     ...remote.state, id: remote.global_id, global_id: remote.global_id, address: remote.address,
     remote: true, origin: remote.origin, membership_status: remote.status,
@@ -908,6 +972,12 @@ export function createApp() {
         bannerColor: /^#[0-9a-f]{6}$/i.test(inputProfile.bannerColor)
           ? inputProfile.bannerColor
           : "#7857ff",
+        memberTag: String(inputProfile.memberTag || "")
+          .trim()
+          .slice(0, 12),
+        memberTagEmoji: String(inputProfile.memberTagEmoji || "")
+          .trim()
+          .slice(0, 16),
         traits: Array.isArray(inputProfile.traits)
           ? inputProfile.traits
               .map((value) => String(value).trim().slice(0, 30))
@@ -1389,6 +1459,29 @@ export function createApp() {
       return res.status(201).json({ attachment: { id: asset.id, url: `/api/v1/assets/${asset.id}`, name: req.file.originalname, mimeType: req.file.mimetype } });
     });
   });
+  app.get("/api/v1/voice/channels/:id/messages", requireUser, (req, res) =>
+    channelExists(req.params.id, "voice") && userCanConnectToChannel(req.params.id, req.user.id)
+      ? res.json({ messages: listMessages(req.params.id) })
+      : res.status(404).json({ error: "Voice channel not found" }),
+  );
+  app.post("/api/v1/voice/channels/:id/messages", requireUser, (req, res) => {
+    const body = String(req.body?.content || "").trim().slice(0, 4000);
+    const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, 8) : [];
+    if ((!body && !attachments.length) || !channelExists(req.params.id, "voice") || !userCanConnectToChannel(req.params.id, req.user.id))
+      return res.status(400).json({ error: "Valid message content and voice channel are required" });
+    return res.status(201).json({
+      message: createMessage({ channelId: req.params.id, authorId: req.user.id, authorName: req.user.display_name, body, attachments }),
+    });
+  });
+  app.post("/api/v1/voice/channels/:id/attachments", requireUser, (req, res) => {
+    if (!channelExists(req.params.id, "voice") || !userCanConnectToChannel(req.params.id, req.user.id))
+      return res.status(404).json({ error: "Voice channel not found" });
+    messageFileUpload.single("file")(req, res, (error) => {
+      if (error || !req.file) return res.status(400).json({ error: error?.message || "Choose a file" });
+      const asset = storeAsset(uploadsDirectory, { buffer: req.file.buffer, mimeType: req.file.mimetype, kind: "voice-message-attachment", ownerUserId: req.user.id });
+      return res.status(201).json({ attachment: { id: asset.id, url: `/api/v1/assets/${asset.id}`, name: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size } });
+    });
+  });
   app.get("/api/v1/assets/:id", (req, res) =>
     sendAsset(uploadsDirectory, req.params.id, res),
   );
@@ -1412,19 +1505,34 @@ export function createApp() {
   );
 
   const communityAddress = (community, req) => `${String(community.name || community.id).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}#${process.env.FEDERATION_DOMAIN || req.get("host")}`;
-  app.get("/api/communities", requireUser, (req, res) =>
-    res.json([...listCommunities(req.user.id).map((community) => ({ ...community, address: communityAddress(community, req) })), ...remoteGuildsFor(req.user.id)]),
-  );
+  app.get("/api/communities", requireUser, (req, res) => {
+    deprecatedEndpoint(res, "/api/v1/guilds");
+    return res.json([...listCommunities(req.user.id).map((community) => ({ ...community, address: communityAddress(community, req) })), ...remoteGuildsFor(req.user.id)]);
+  });
   app.get("/api/v1/friends", requireUser, (req, res) => res.json({ friends: listFriends(req.user.id), requests: listFriendRequests(req.user.id) }));
   app.post("/api/v1/friends/request", requireUser, (req, res) => {
     const lookup = String(req.body?.username || "").trim();
     const localUsername = lookup.match(/^([^@]+)@(?:localhost(?::\d+)?|127\.0\.0\.1(?::\d+)?)$/i)?.[1] || lookup;
     const target = findUserByUsername(localUsername) || findUserByEmail(lookup);
     if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.id === getSystemUser().id) return res.status(403).json({ error: "The instance system account cannot accept friend requests" });
     try { sendFriendRequest(req.user.id, target.id); return res.status(201).json({ ok: true }); } catch (e) { return res.status(400).json({ error: e.message }); }
   });
   app.post("/api/v1/friends/:id/accept", requireUser, (req, res) => acceptFriendRequest(req.params.id, req.user.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Request not found" }));
   app.delete("/api/v1/friends/:id", requireUser, (req, res) => removeFriend(req.user.id, req.params.id) ? res.status(204).end() : res.status(404).json({ error: "Friend not found" }));
+  app.post("/api/v1/reports", requireUser, (req, res) => {
+    const targetType = ["user", "message", "community", "peer"].includes(req.body?.targetType) ? req.body.targetType : null,
+      targetId = String(req.body?.targetId || "").trim().slice(0, 300), category = String(req.body?.category || "").trim().slice(0, 80),
+      description = String(req.body?.description || "").trim().slice(0, 2000);
+    if (!targetType || !targetId || !category) return res.status(400).json({ error: "Report target and category are required" });
+    if (targetType === "user" && !findPublicUser(targetId)) return res.status(404).json({ error: "Reported user not found" });
+    if (targetType === "user" && targetId === req.user.id) return res.status(400).json({ error: "You cannot report your own account" });
+    const report = createInstanceReport({ reporterId: req.user.id, targetType, targetId, category, description,
+      evidence: req.body?.evidence && typeof req.body.evidence === "object" ? req.body.evidence : {} });
+    moderationEvents.emit("report:created", { reportId: report.id });
+    return res.status(201).json({ report });
+  });
+  app.get("/api/v1/dms", requireUser, (req, res) => res.json({ conversations: listDirectMessageContacts(req.user.id) }));
   app.get("/api/v1/dms/:userId", requireUser, (req, res) => {
     const target = findPublicUser(req.params.userId);
     if (!target) return res.status(404).json({ error: "User not found" });
@@ -1507,19 +1615,22 @@ export function createApp() {
   app.post("/api/v1/dms/:userId", requireUser, (req, res) => {
     const target = findPublicUser(req.params.userId), body = String(req.body?.body || "").trim().slice(0, 4000);
     if (!target) return res.status(404).json({ error: "User not found" });
+    if (target.id === getSystemUser().id) return res.status(403).json({ error: "The instance system conversation is read-only" });
     if (!body) return res.status(400).json({ error: "Message is required" });
     res.status(201).json({ message: createDirectMessage(req.user.id, target.id, body) });
   });
-  app.get("/api/channels/:id/messages", requireUser, (req, res) =>
-    channelExists(req.params.id, "text") && userCanAccessChannel(req.params.id, req.user.id)
+  app.get("/api/channels/:id/messages", requireUser, (req, res) => {
+    deprecatedEndpoint(res, `/api/v1/channels/${encodeURIComponent(req.params.id)}/messages`);
+    return channelExists(req.params.id, "text") && userCanAccessChannel(req.params.id, req.user.id)
       ? res.json(listMessages(req.params.id))
-      : res.status(404).json({ error: "Text channel not found" }),
-  );
+      : res.status(404).json({ error: "Text channel not found" });
+  });
   app.post("/api/livekit/token", requireUser, async (req, res) => {
     const { channelId, dmUserId } = req.body || {};
     if (dmUserId) {
       const target = findPublicUser(String(dmUserId));
       if (!target) return res.status(404).json({ error: "DM user not found" });
+      if (target.id === getSystemUser().id) return res.status(403).json({ error: "The instance system account cannot join calls" });
       if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) return res.status(503).json({ error: "LiveKit is not configured" });
       const roomName = `dm:${[req.user.id, target.id].sort().join(":")}`;
       const token = new AccessToken(process.env.LIVEKIT_API_KEY.trim(), process.env.LIVEKIT_API_SECRET.trim(), { identity: req.user.id, name: req.user.display_name, ttl: "2h" });
@@ -1557,7 +1668,16 @@ export function createApp() {
       const lk = new LiveKitAPI({ host: livekitInternalUrl.replace(/^ws/, "http"), apiKey: process.env.LIVEKIT_API_KEY.trim(), secret: process.env.LIVEKIT_API_SECRET.trim() });
       const entries = await Promise.all(channels.map(async (channel) => {
         const participants = await lk.room.listParticipants(`voice:${communityId}:${channel.id}`);
-        return [channel.id, participants.map((participant) => ({ identity: participant.identity, name: participant.name }))];
+        return [channel.id, participants.map((participant) => {
+          const tracks = participant.tracks || [];
+          return {
+            identity: participant.identity,
+            name: participant.name,
+            camera: tracks.some((track) => track.source === 1 && !track.muted),
+            screen: tracks.some((track) => track.source === 3 && !track.muted),
+            muted: tracks.some((track) => track.source === 2 && track.muted),
+          };
+        })];
       }));
       return res.json({ channels: Object.fromEntries(entries) });
     } catch { return res.json({ channels: {} }); }

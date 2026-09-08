@@ -9,7 +9,7 @@ import {
   watch,
 } from "vue";
 import { io } from "socket.io-client";
-import { Room, RoomEvent, Track } from "livekit-client";
+import { Room, RoomEvent, Track, supportsAV1, supportsVP9 } from "livekit-client";
 import { FontAwesomeIcon } from "@fortawesome/vue-fontawesome";
 import {
   faArrowLeft,
@@ -27,6 +27,7 @@ import {
   faPhoneSlash,
   faRightFromBracket,
   faServer,
+  faShieldHalved,
   faPlus,
   faSliders,
   faChartSimple,
@@ -87,6 +88,9 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   activeCommunityId = ref(null),
   selected = ref(null),
   messages = ref([]),
+  messageSearch = ref(""),
+  memberSearch = ref(""),
+  channelSearch = ref(""),
   unreadChannels = ref({}),
   unreadCommunities = ref({}),
   draft = ref(""),
@@ -97,6 +101,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   reactionMessageId = ref(null),
   composerMenuOpen = ref(false),
   revealedAttachments = ref({}),
+  imageLightbox = ref(null),
   soundEnabled = ref(true),
   emojiPickerOpen = ref(false),
   customEmojis = ref([]),
@@ -111,7 +116,12 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   instanceEmojiName = ref("LibraCord"),
   voiceRoom = ref(null),
   voiceStatus = ref(""),
+  voiceConnecting = ref(false),
   voicePanelOpen = ref(false),
+  voiceMessages = ref([]),
+  voiceDraft = ref(""),
+  voicePendingAttachments = ref([]),
+  voiceChatChannelName = ref(""),
   membersPanelOpen = ref(true),
   voiceParticipants = ref([]),
   voiceChannelPresence = ref({}),
@@ -121,6 +131,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   watchingScreens = ref([]),
   localScreenTrack = ref(null),
   voiceActiveSpeakers = ref([]),
+  voiceMediaVersion = ref(0),
   focusedVoiceParticipant = ref(null),
   voiceStagePosition = ref({ x: null, y: null }),
   voiceStageDrag = ref(null),
@@ -139,6 +150,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   adminTab = ref("instance"),
   instanceForm = ref({}),
   adminUsers = ref([]),
+  adminModeration = ref({ bans: [], reports: [], actions: [], system_user: null }),
   guildDialog = ref(false),
   newGuild = ref({ name: "", description: "" }),
   guildSettingsDialog = ref(false),
@@ -150,7 +162,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
     description: "",
     iconUrl: "",
     bannerUrl: "",
-    profile: { bannerColor: "#7857ff", traits: ["", "", "", "", ""] },
+    profile: { bannerColor: "#7857ff", memberTag: "", memberTagEmoji: "", traits: ["", "", "", "", ""] },
   }),
   channelForm = ref({ name: "", kind: "text" }),
   guildSettingsTab = ref("overview"),
@@ -185,6 +197,8 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
     inputDeviceId: "",
     outputDeviceId: "",
     cameraDeviceId: "",
+    cameraQuality: "1080p",
+    cameraFps: 30,
     inputVolume: 100,
     outputVolume: 100,
     status: "online",
@@ -193,6 +207,15 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
     selectedUsernameStyleIds: [],
     selectedProfileThemeId: "",
     hardwareAcceleration: true,
+    accentColor: "#8b5cf6",
+    density: "default",
+    textSize: 100,
+    messageSpacing: "comfortable",
+    reducedMotion: false,
+    increasedContrast: false,
+    reducedTransparency: false,
+    showMessagePreviews: true,
+    language: "en-GB",
   }),
   profileName = ref(""),
   profileUsername = ref(""),
@@ -217,6 +240,16 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   micMuted = ref(false),
   deafened = ref(false),
   saved = ref("");
+const messageElementRefs = new Map();
+function preferredVideoCodec() {
+  try {
+    if (supportsAV1()) return "av1";
+  } catch {}
+  try {
+    if (supportsVP9()) return "vp9";
+  } catch {}
+  return "vp8";
+}
 const activeCommunity = computed(
     () =>
       communities.value.find((item) => item.id === activeCommunityId.value) ||
@@ -227,9 +260,18 @@ const activeCommunity = computed(
     ...federatedGuildEmojis.value,
     ...customEmojis.value,
   ]),
-  communityAtmosphereStyle = computed(() =>
-    atmosphereStyle(activeCommunity.value?.profile?.atmosphere || {}),
-  ),
+  communityMemberTag = computed(() => ({
+    text: String(activeCommunity.value?.profile?.memberTag || "").trim(),
+    emoji: String(activeCommunity.value?.profile?.memberTagEmoji || "").trim(),
+  })),
+  communityAtmosphereStyle = computed(() => {
+    const atmosphere = { ...(activeCommunity.value?.profile?.atmosphere || {}) };
+    if (!atmosphere.backgroundUrl && activeCommunity.value?.banner_url) {
+      atmosphere.mode = "image";
+      atmosphere.backgroundUrl = activeCommunity.value.banner_url;
+    }
+    return atmosphereStyle(atmosphere);
+  }),
   compactCommunityDock = computed(() => {
     const estimated = communities.value.reduce(
       (width, guild) => width + 72 + Math.min(guild.name.length * 7, 120),
@@ -238,7 +280,10 @@ const activeCommunity = computed(
     return estimated > dockWidth.value;
   });
 const sidebarChannelGroups = computed(() => {
-  const channels = [...(activeCommunity.value?.channels || [])].sort(
+  const query = channelSearch.value.trim().toLowerCase();
+  const channels = [...(activeCommunity.value?.channels || [])].filter(
+    (channel) => !query || channel.name.toLowerCase().includes(query),
+  ).sort(
     (a, b) => (a.position || 0) - (b.position || 0),
   );
   const groups = guildCategories.value
@@ -246,6 +291,18 @@ const sidebarChannelGroups = computed(() => {
     .filter((group) => group.channels.length);
   const uncategorized = channels.filter((channel) => !channel.category_id || !guildCategories.value.some((category) => category.id === channel.category_id));
   return uncategorized.length ? [{ id: "uncategorized", name: "Channels", channels: uncategorized }, ...groups] : groups;
+});
+const displayedMessages = computed(() => {
+  const query = messageSearch.value.trim().toLowerCase();
+  return query
+    ? messages.value.filter((message) => `${message.author_name} ${message.body}`.toLowerCase().includes(query))
+    : messages.value;
+});
+const displayedGuildMembers = computed(() => {
+  const query = memberSearch.value.trim().toLowerCase();
+  return query
+    ? guildMembers.value.filter((member) => `${member.nickname || ""} ${member.display_name} ${member.username}`.toLowerCase().includes(query))
+    : guildMembers.value;
 });
 let dockObserver;
 function updateDockScroll() {
@@ -276,10 +333,10 @@ function atmosphereStyle(atmosphere = {}) {
   const angle = atmosphere.angle || 135;
   const background =
     atmosphere.mode === "image" && atmosphere.backgroundUrl
-      ? `linear-gradient(${angle}deg, ${start}99, ${end}bb), url(${atmosphere.backgroundUrl})`
+      ? `radial-gradient(circle at 72% 4%, #356dff66, transparent 34%), linear-gradient(${angle}deg, ${start}80, ${end}99), url(${atmosphere.backgroundUrl})`
       : atmosphere.mode === "solid"
-        ? start
-        : `linear-gradient(${angle}deg, ${start}, ${end})`;
+        ? `radial-gradient(circle at 76% 0%, #6d4aff55, transparent 36%), ${start}`
+        : `radial-gradient(circle at 72% 0%, #326dff73, transparent 34%), radial-gradient(circle at 100% 22%, #a32cff42, transparent 30%), linear-gradient(${angle}deg, ${start}, ${end})`;
   return {
     "--community-start": start,
     "--community-end": end,
@@ -531,7 +588,7 @@ async function beginSession(nextUser) {
     dmUnread.value = 0;
   }
   ensureDmKey().catch(() => {});
-  communities.value = await api("/api/communities");
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
   let savedNavigation = null;
   try { savedNavigation = JSON.parse(localStorage.getItem(`libracord-navigation:${serverOrigin || location.origin}:${nextUser.id}`) || "null"); } catch {}
   activeCommunityId.value = communities.value.some((guild) => guild.id === savedNavigation?.communityId)
@@ -557,10 +614,12 @@ async function beginSession(nextUser) {
   await refreshFriends();
   try {
     const ids = JSON.parse(localStorage.getItem(`libracord-open-dms:${serverOrigin || location.origin}:${nextUser.id}`) || "[]");
-    const savedContacts = friends.value.filter((friend) => ids.includes(friend.id));
+    const conversations = (await api("/api/v1/dms")).conversations || [];
+    const availableContacts = [...new Map([...conversations, ...friends.value].map((contact) => [contact.id, contact])).values()];
+    const savedContacts = availableContacts.filter((friend) => ids.includes(friend.id));
     // Older sessions did not persist the open conversation list; keep the
     // friends available so existing DMs remain discoverable after refresh.
-    openDmUsers.value = savedContacts.length ? savedContacts : friends.value;
+    openDmUsers.value = savedContacts.length ? savedContacts : availableContacts;
   } catch { openDmUsers.value = []; }
   collectionIds.value = (
     await api("/api/v1/users/@me/collection")
@@ -641,7 +700,11 @@ function startDmCall(mode) {
 }
 async function joinDmCall(otherId) {
   const credentials = await api("/api/livekit/token", { method: "POST", body: JSON.stringify({ dmUserId: otherId }) });
-  const room = new Room({ adaptiveStream: false, dynacast: false });
+  const room = new Room({
+    adaptiveStream: false,
+    dynacast: false,
+    publishDefaults: { videoCodec: preferredVideoCodec() },
+  });
   room.on(RoomEvent.TrackSubscribed, (track) => { if (track.kind === Track.Kind.Audio) { const audio = document.createElement("audio"); audio.autoplay = true; audio.srcObject = new MediaStream([track.mediaStreamTrack]); document.body.appendChild(audio); } else if (track.kind === Track.Kind.Video) { const video = document.createElement("video"); video.autoplay = true; video.playsInline = true; video.srcObject = new MediaStream([track.mediaStreamTrack]); let media = document.querySelector(".dm-call-media"); if (!media) { media = document.createElement("div"); media.className = "dm-call-media"; document.querySelector(".dm-call-card")?.prepend(media); } media.appendChild(video); } });
   await room.connect(credentials.url, credentials.token);
   await room.localParticipant.setMicrophoneEnabled(true);
@@ -675,7 +738,7 @@ async function refreshCommunityFromServer(communityId) {
   const id = String(communityId);
   const refreshVersion = ++communityRefreshVersion.value;
   try {
-    const result = await api("/api/communities");
+    const result = (await api("/api/v1/guilds")).guilds || [];
     if (refreshVersion !== communityRefreshVersion.value) return;
     const fresh = (result || []).find((guild) => String(guild.id) === id);
     if (!fresh) return;
@@ -743,12 +806,12 @@ async function selectChannel(channel) {
     return joinVoice(channel);
   }
   socket.emit("channel:join", channel.id);
-  messages.value = await api(`/api/channels/${channel.id}/messages`);
+  messages.value = (await api(`/api/v1/channels/${channel.id}/messages`)).messages || [];
   messageRefreshTimer.value = setInterval(async () => {
     if (selected.value?.id !== channel.id || selected.value?.kind !== "text") return;
     try {
-      const latest = await api(`/api/channels/${channel.id}/messages`);
-      if (selected.value?.id === channel.id) messages.value = latest;
+      const latest = await api(`/api/v1/channels/${channel.id}/messages`);
+      if (selected.value?.id === channel.id) messages.value = latest.messages || [];
     } catch {}
   }, 2000);
 }
@@ -766,11 +829,9 @@ async function sendMessage() {
       contentWarning.value = "";
       replyTo.value = null;
       const refreshed = await api(
-        `/api/channels/${selected.value.id}/messages`,
+        `/api/v1/channels/${selected.value.id}/messages`,
       );
-      messages.value = Array.isArray(refreshed)
-        ? refreshed
-        : refreshed.messages || [];
+      messages.value = refreshed.messages || [];
     } catch (e) {
       error.value = e.message;
     }
@@ -796,6 +857,19 @@ async function uploadMessageAttachment(event) {
 function reactToMessage(message, emoji = "❤️") {
   const current = messageReactions.value[message.id] || [];
   messageReactions.value = { ...messageReactions.value, [message.id]: current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji] };
+}
+function reactionCustomEmoji(reaction) {
+  const match = String(reaction || "").match(/^:([^:]+):$/);
+  return match ? allCustomEmojis.value.find((emoji) => emoji.name === match[1]) || null : null;
+}
+function openImageLightbox(source, name = "Image") {
+  imageLightbox.value = { source: apiEndpoint(source), name: name || "Image" };
+}
+function closeImageLightbox() {
+  imageLightbox.value = null;
+}
+function handleLightboxKey(event) {
+  if (event.key === "Escape" && imageLightbox.value) closeImageLightbox();
 }
 function toggleAttachment(messageId, attachmentId) {
   const key = `${messageId}:${attachmentId}`;
@@ -823,8 +897,32 @@ function toggleEmojiGroup(name) {
   collapsedEmojiGroups.value[name] = !collapsedEmojiGroups.value[name];
 }
 function chooseEmoji(value) {
+  if (reactionMessageId.value) {
+    const target = messages.value.find((message) => Number(message.id) === Number(reactionMessageId.value));
+    if (target) reactToMessage(target, value);
+    reactionMessageId.value = null;
+    emojiPickerOpen.value = false;
+    emojiSearch.value = "";
+    return;
+  }
   draft.value += value;
   emojiPickerOpen.value = false;
+}
+function openReactionPicker(message) {
+  reactionMessageId.value = message.id;
+  emojiSearch.value = "";
+  emojiPickerOpen.value = true;
+}
+function closeEmojiPicker() {
+  emojiPickerOpen.value = false;
+  reactionMessageId.value = null;
+  emojiSearch.value = "";
+}
+function toggleComposerEmojiPicker() {
+  const opening = !emojiPickerOpen.value || Boolean(reactionMessageId.value);
+  reactionMessageId.value = null;
+  emojiSearch.value = "";
+  emojiPickerOpen.value = opening;
 }
 function filteredDefaultEmojis(group) {
   return emojiSearch.value
@@ -870,6 +968,28 @@ function messageSegments(body) {
 function messageAuthor(message) {
   if (message.author_id === user.value?.id) return user.value;
   return guildMembers.value.find((member) => member.id === message.author_id) || null;
+}
+function repliedMessage(message) {
+  if (!message?.reply_to) return null;
+  return messages.value.find((candidate) => Number(candidate.id) === Number(message.reply_to)) || null;
+}
+function setMessageElement(messageId, element) {
+  if (element) messageElementRefs.set(Number(messageId), element);
+  else messageElementRefs.delete(Number(messageId));
+}
+async function jumpToMessage(messageId) {
+  const id = Number(messageId);
+  if (!messageElementRefs.has(id) && messageSearch.value) {
+    messageSearch.value = "";
+    await nextTick();
+  }
+  const element = messageElementRefs.get(id);
+  if (!element) return;
+  element.scrollIntoView({ behavior: "smooth", block: "center" });
+  element.classList.remove("message-jump-highlight");
+  void element.offsetWidth;
+  element.classList.add("message-jump-highlight");
+  window.setTimeout(() => element.classList.remove("message-jump-highlight"), 1800);
 }
 async function uploadEmoji() {
   if (!emojiFile.value || !emojiName.value.trim()) return;
@@ -927,16 +1047,22 @@ async function removeGuildEmoji(emoji) {
 }
 async function joinVoice(channel) {
   await leaveVoice();
+  voiceConnecting.value = true;
   voiceStatus.value = `Connecting to ${channel.name}…`;
+  let room = null;
   try {
     const credentials = await api("/api/livekit/token", {
         method: "POST",
         body: JSON.stringify({ channelId: channel.id }),
-      }),
-      // Keep the full-quality video layer available. Adaptive stream can lock
-      // onto a low layer when the tile starts small and never recover after it
-      // is expanded fullscreen.
-      room = new Room({ adaptiveStream: false, dynacast: false });
+      });
+    // Keep the full-quality video layer available. Adaptive stream can lock
+    // onto a low layer when the tile starts small and never recover after it
+    // is expanded fullscreen.
+    room = new Room({
+      adaptiveStream: false,
+      dynacast: false,
+      publishDefaults: { videoCodec: preferredVideoCodec() },
+    });
     room.on(RoomEvent.TrackSubscribed, async (track, publication, participant) => {
       if (track.kind === Track.Kind.Audio) {
         // Never play a locally published track back to the sharer. This is
@@ -965,25 +1091,15 @@ async function joinVoice(channel) {
           return;
         }
         await nextTick();
-        const element = document.createElement("video");
-        element.srcObject = new MediaStream([track.mediaStreamTrack]);
-        element.autoplay = true;
-        element.playsInline = true;
-        element.className = `voice-video-tile ${isScreen ? "screen-share-video" : "camera-video"}`;
         const target = document.querySelector(`#${isScreen ? `voice-screen-${participantSid}` : `voice-tile-${participantSid}`}`);
         if (target) {
           if (isScreen) target.classList.add("screen-tile");
-          // A participant tile represents one active visual stream. Remove
-          // the previous camera/screen element so tracks never stack on top
-          // of each other and distort the grid.
-          target.querySelectorAll("video").forEach((video) => video.remove());
-          // The avatar is only a placeholder; never leave it underneath a
-          // live video element (it makes streams look incorrectly layered).
-          target.querySelectorAll("img").forEach((image) => image.remove());
+          attachVoicePreview(
+            target,
+            track.mediaStreamTrack,
+            `voice-video-tile ${isScreen ? "screen-share-video" : "camera-video"}`,
+          );
         }
-        target?.querySelector(".voice-placeholder")?.remove();
-        target?.appendChild(element);
-        element.play?.().catch(() => {});
       }
     });
     room.on(RoomEvent.ParticipantConnected, () => { syncVoiceParticipants(); updateVoiceStatus(); socket.emit("voice:changed", channel.id); });
@@ -1011,6 +1127,9 @@ async function joinVoice(channel) {
     // LiveKit Room contains native WebRTC objects and must not be wrapped in
     // Vue's Proxy, which Electron cannot structured-clone.
     voiceRoom.value = markRaw(room);
+    voiceChatChannelName.value = channel.name;
+    socket.emit("voice-chat:join", channel.id);
+    voiceConnecting.value = false;
     socket.emit("voice:changed", channel.id);
     playUiSound("join");
     syncVoiceParticipants();
@@ -1021,7 +1140,19 @@ async function joinVoice(channel) {
         : undefined,
     );
     updateVoiceStatus();
+    // Side-chat availability must never decide whether the LiveKit call stays
+    // connected (for example while the API server is restarting or an older
+    // server version is still running).
+    try {
+      voiceMessages.value = (await api(`/api/v1/voice/channels/${channel.id}/messages`)).messages || [];
+    } catch {
+      voiceMessages.value = [];
+    }
   } catch (e) {
+    // Do not leave LiveKit's reconnect loop running after a failed join. It
+    // would reuse a stale session and repeatedly create duplicate identities.
+    if (room) await room.disconnect().catch(() => {});
+    voiceConnecting.value = false;
     voiceStatus.value = e.message?.includes("signal") || e.message?.includes("fetch")
       ? "Could not reach LiveKit signaling. Check the public /rtc WebSocket route and try again."
       : e.message;
@@ -1033,12 +1164,24 @@ function updateVoiceStatus() {
 }
 async function leaveVoice() {
   const changedChannelId = voiceRoom.value?.__channelId;
+  if (changedChannelId) socket.emit("voice-chat:leave", changedChannelId);
   if (voiceRoom.value) playUiSound("leave");
   if (voiceRoom.value) await voiceRoom.value.disconnect();
   if (changedChannelId) socket.emit("voice:changed", changedChannelId);
+  if (changedChannelId && voiceChannelPresence.value[changedChannelId]) {
+    voiceChannelPresence.value = {
+      ...voiceChannelPresence.value,
+      [changedChannelId]: voiceChannelPresence.value[changedChannelId].filter((entry) => entry.identity !== user.value?.id),
+    };
+  }
   voiceRoom.value = null;
+  voiceConnecting.value = false;
   voiceStatus.value = "";
   voicePanelOpen.value = false;
+  voiceMessages.value = [];
+  voiceDraft.value = "";
+  voicePendingAttachments.value = [];
+  voiceChatChannelName.value = "";
   voiceParticipants.value = [];
   voiceScreenShares.value = [];
   voiceScreenTracks.value = {};
@@ -1047,6 +1190,41 @@ async function leaveVoice() {
   focusedVoiceParticipant.value = null;
   document.querySelector("#voice-stage")?.replaceChildren();
   document.querySelector("#remote-audio")?.replaceChildren();
+  await refreshVoicePresence();
+}
+async function sendVoiceMessage() {
+  const channelId = voiceRoom.value?.__channelId;
+  const body = voiceDraft.value.trim();
+  if (!channelId || (!body && !voicePendingAttachments.value.length)) return;
+  if (!socket.connected) {
+    try {
+      const result = await api(`/api/v1/voice/channels/${channelId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content: body, attachments: voicePendingAttachments.value }),
+      });
+      if (!voiceMessages.value.some((item) => item.id === result.message.id)) voiceMessages.value.push(result.message);
+      voiceDraft.value = "";
+      voicePendingAttachments.value = [];
+    } catch (e) { error.value = e.message; }
+    return;
+  }
+  socket.emit("voice:message:create", { channelId, body, attachments: voicePendingAttachments.value }, (result) => {
+    if (result?.ok) { voiceDraft.value = ""; voicePendingAttachments.value = []; }
+    else error.value = result?.error || "Voice message could not be sent";
+  });
+}
+async function uploadVoiceAttachment(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  const channelId = voiceRoom.value?.__channelId;
+  if (!file || !channelId) return;
+  try {
+    const form = new FormData(); form.append("file", file);
+    const response = await fetch(apiEndpoint(`/api/v1/voice/channels/${channelId}/attachments`), { method: "POST", credentials: "include", body: form });
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.error || "Upload failed");
+    voicePendingAttachments.value.push(payload.attachment);
+  } catch (e) { error.value = e.message; }
 }
 function voiceColor(identity) {
   let hash = 0;
@@ -1054,9 +1232,26 @@ function voiceColor(identity) {
   return `hsl(${Math.abs(hash) % 360} 68% 55%)`;
 }
 function channelPresence(channel) {
+  void voiceMediaVersion.value;
   return (voiceChannelPresence.value[channel.id] || []).map((entry) => {
     const member = guildMembers.value.find((item) => item.id === entry.identity || item.username === entry.identity);
-    return { ...entry, name: member?.display_name || entry.name || entry.identity, avatar: member?.avatar_url || "" };
+    const live = channel.id === voiceRoom.value?.__channelId
+      ? voiceParticipants.value.find((item) => item.userId === entry.identity || item.identity === entry.name)
+      : null;
+    const local = live?.local ? voiceRoom.value?.localParticipant : null;
+    const remote = live && !live.local ? voiceRoom.value?.remoteParticipants.get(live.sid) : null;
+    const camera = local?.isCameraEnabled || Boolean(remote?.getTrackPublication?.(Track.Source.Camera)?.track) || entry.camera;
+    return {
+      ...entry,
+      name: member?.display_name || entry.name || entry.identity,
+      avatar: member?.avatar_url || live?.avatar || "",
+      banner: member?.banner_url || live?.banner || "",
+      color: member?.accent_color || live?.color || voiceColor(entry.identity),
+      sid: live?.sid || "",
+      speaking: Boolean(live && voiceActiveSpeakers.value.includes(live.sid)),
+      camera: Boolean(camera),
+      screen: Boolean((live && voiceScreenShares.value.includes(live.sid)) || entry.screen),
+    };
   });
 }
 function primaryMemberRole(member) {
@@ -1097,9 +1292,9 @@ function usernameThemeStyle(member) {
 function membersWithRole(roleId) {
   return guildMembers.value.filter((member) => member.roles?.some((role) => role.id === roleId));
 }
-function isFirstRoleMember(member, index) {
+function isFirstRoleMember(member, index, list = guildMembers.value) {
   const role = primaryMemberRole(member)?.id || "__online";
-  return guildMembers.value.findIndex((item) => (primaryMemberRole(item)?.id || "__online") === role) === index;
+  return list.findIndex((item) => (primaryMemberRole(item)?.id || "__online") === role) === index;
 }
 async function toggleMemberRole(role) {
   const targetId = userMenu.value?.id;
@@ -1129,6 +1324,33 @@ const voiceFloatingStyle = computed(() =>
         bottom: "auto",
       },
 );
+const userSettingsPages = {
+  profile: ["My profile", "Manage your identity, profile media, biography, and cosmetics."],
+  password: ["Password", "Update the password used to access your account."],
+  audio: ["Voice & audio", "Configure microphones, speakers, cameras, and call quality."],
+  appearance: ["Appearance", "Choose how LibraCord looks and feels on this device."],
+  accessibility: ["Accessibility", "Adjust motion, contrast, text, and reading preferences."],
+  notifications: ["Notifications", "Control alerts, sounds, and desktop notifications."],
+  privacy: ["Privacy & safety", "Manage messaging, content, and safety preferences."],
+  language: ["Language", "Choose your display language and regional preferences."],
+  desktop: ["Desktop app", "Configure native desktop behavior and performance."],
+  advanced: ["Advanced", "Manage diagnostic and advanced client options."],
+};
+const communitySettingsPages = {
+  overview: ["Server profile", "Configure your community identity, description, icon, and banner."],
+  appearance: ["Atmosphere", "Customize the visual character of this community."],
+  channels: ["Channels", "Create, organize, and manage community channels and categories."],
+  roles: ["Roles", "Control member roles and their community permissions."],
+  members: ["Members", "Review and manage the people in this community."],
+  invites: ["Invites", "Create and manage links that bring people into the community."],
+  webhooks: ["Webhooks", "Connect external services and automated messages."],
+  emoji: ["Emoji", "Manage custom expression for this community."],
+  safety: ["Safety setup", "Configure moderation and community safety defaults."],
+  audit: ["Audit log", "Review important administrative actions."],
+  onboarding: ["Onboarding", "Shape the experience for new community members."],
+};
+const userSettingsPage = computed(() => userSettingsPages[settingsTab.value] || userSettingsPages.profile);
+const communitySettingsPage = computed(() => communitySettingsPages[guildSettingsTab.value] || ["Community settings", "Configure and manage this community."]);
 const visibleVoiceParticipants = computed(() => {
   if (!voiceRoom.value || selected.value?.id === voiceRoom.value.__channelId)
     return voiceParticipants.value;
@@ -1149,7 +1371,9 @@ const visibleVoiceVisuals = computed(() => {
   }
   if (focusedVoiceParticipant.value) {
     const focused = visuals.find((participant) => participant.sid === focusedVoiceParticipant.value);
-    return focused ? [focused] : visuals;
+    return focused
+      ? [focused, ...visuals.filter((participant) => participant.sid !== focusedVoiceParticipant.value)]
+      : visuals;
   }
   return visuals;
 });
@@ -1183,6 +1407,24 @@ function stopVoiceStageDrag(event) {
 function voiceTileId(participant) {
   return participant.isScreen ? `voice-screen-${participant.participantSid}` : `voice-tile-${participant.sid}`;
 }
+function attachVoicePreview(target, mediaStreamTrack, className, muted = false) {
+  if (!target || !mediaStreamTrack) return;
+  const trackId = mediaStreamTrack.id || `${mediaStreamTrack.kind}-track`;
+  const current = target.querySelector("video");
+  if (current?.dataset.trackId === trackId) return;
+  target.querySelectorAll("video").forEach((video) => video.remove());
+  target.querySelectorAll("img").forEach((image) => image.remove());
+  target.querySelector(".voice-placeholder")?.remove();
+  const element = document.createElement("video");
+  element.srcObject = new MediaStream([mediaStreamTrack]);
+  element.autoplay = true;
+  element.playsInline = true;
+  element.muted = muted;
+  element.className = className;
+  element.dataset.trackId = trackId;
+  target.appendChild(element);
+  element.play?.().catch(() => {});
+}
 async function watchScreen(participant) {
   const sid = participant.participantSid || participant.sid;
   if (!sid) return;
@@ -1191,37 +1433,48 @@ async function watchScreen(participant) {
   const track = voiceScreenTracks.value[sid];
   const target = document.querySelector(`#voice-screen-${sid}`);
   if (!track || !target) return;
-  const element = document.createElement("video");
-  element.srcObject = new MediaStream([track.mediaStreamTrack]);
-  element.autoplay = true;
-  element.playsInline = true;
-  element.className = "voice-video-tile screen-share-video";
-  target.querySelectorAll("video").forEach((video) => video.remove());
-  target.querySelector(".voice-placeholder")?.remove();
-  target.appendChild(element);
-  element.play?.().catch(() => {});
+  attachVoicePreview(target, track.mediaStreamTrack, "voice-video-tile screen-share-video", participant.local);
 }
-watch(visibleVoiceVisuals, async (visuals) => {
+async function restoreVoicePreviews(visuals = visibleVoiceVisuals.value) {
   await nextTick();
   for (const participant of visuals.filter((item) => item.isScreen && watchingScreens.value.includes(item.participantSid))) {
     const tile = document.querySelector(`#voice-screen-${participant.participantSid}`);
     if (tile && !tile.querySelector("video")) await watchScreen(participant);
   }
+  const local = voiceRoom.value?.localParticipant;
+  if (!local) return;
+  const cameraPublication = local.getTrackPublication?.(Track.Source.Camera) ||
+    [...local.videoTrackPublications.values()].find((publication) => publication.track && String(publication.source).toLowerCase().includes("camera"));
+  const cameraTile = document.querySelector(`#voice-tile-${local.sid}`);
+  if (cameraPublication?.track && cameraTile)
+    attachVoicePreview(cameraTile, cameraPublication.track.mediaStreamTrack, "voice-video-tile local local-camera", true);
+  for (const participant of voiceRoom.value.remoteParticipants.values()) {
+    const publication = participant.getTrackPublication?.(Track.Source.Camera) ||
+      [...participant.videoTrackPublications.values()].find((item) => item.track && String(item.source).toLowerCase().includes("camera"));
+    const tile = document.querySelector(`#voice-tile-${participant.sid}`);
+    if (publication?.track && tile)
+      attachVoicePreview(tile, publication.track.mediaStreamTrack, "voice-video-tile camera-video");
+  }
+}
+watch([visibleVoiceVisuals, page, () => selected.value?.id], async ([visuals]) => {
+  await restoreVoicePreviews(visuals);
 });
 function syncVoiceParticipants() {
   if (!voiceRoom.value) return;
   const local = voiceRoom.value.localParticipant;
   voiceParticipants.value = [
-    { sid: local.sid, identity: user.value.display_name, local: true, avatar: user.value.avatar_url, color: user.value.accent_color },
+    { sid: local.sid, userId: user.value.id, identity: user.value.display_name, local: true, avatar: user.value.avatar_url, banner: user.value.banner_url, color: user.value.accent_color },
     ...[...voiceRoom.value.remoteParticipants.values()].map((participant) => {
       const member = guildMembers.value.find(
         (entry) => entry.id === participant.identity || entry.username === participant.identity,
       );
       return {
         sid: participant.sid,
+        userId: participant.identity,
         identity: member?.display_name || participant.identity,
         local: false,
         avatar: member?.avatar_url || "",
+        banner: member?.banner_url || "",
         color: member?.accent_color || voiceColor(participant.identity),
       };
     }),
@@ -1230,39 +1483,36 @@ function syncVoiceParticipants() {
 function focusVoiceParticipant(participant) {
   const focusId = participant.sid;
   focusedVoiceParticipant.value = focusedVoiceParticipant.value === focusId ? null : focusId;
+  nextTick(() => restoreVoicePreviews());
 }
 async function toggleCamera() {
   if (!voiceRoom.value) return;
   const enabling = !voiceRoom.value.localParticipant.isCameraEnabled;
   try {
     const cameraDeviceId = String(settings.value.cameraDeviceId || "");
+    const cameraSizes = { "720p": { width: 1280, height: 720 }, "1080p": { width: 1920, height: 1080 }, "1440p": { width: 2560, height: 1440 }, "4K": { width: 3840, height: 2160 } };
+    const cameraSize = cameraSizes[settings.value.cameraQuality] || cameraSizes["1080p"];
+    const cameraFps = Number(settings.value.cameraFps || 30);
+    const cameraBitrate = settings.value.cameraQuality === "4K" ? 40_000_000 : settings.value.cameraQuality === "1440p" ? 20_000_000 : settings.value.cameraQuality === "1080p" ? 10_000_000 : 5_000_000;
     // Do not impose an artificial 720p/30 cap: let the selected webcam and
     // browser negotiate their native resolution and frame rate.
     const publication = await voiceRoom.value.localParticipant.setCameraEnabled(
       enabling,
       {
         ...(cameraDeviceId ? { deviceId: cameraDeviceId } : {}),
-        videoEncoding: { maxBitrate: 5000000 },
-        degradationPreference: "maintain-resolution",
+        resolution: { ...cameraSize, frameRate: cameraFps },
+        frameRate: { ideal: cameraFps, max: cameraFps },
       },
+      { videoCodec: preferredVideoCodec(), videoEncoding: { maxBitrate: cameraBitrate, maxFramerate: cameraFps }, degradationPreference: "maintain-resolution", simulcast: true },
     );
     await nextTick();
     const localTile = document.querySelector(`#voice-tile-${voiceRoom.value.localParticipant.sid}`);
     localTile?.querySelectorAll("video")?.forEach((video) => video.remove());
     if (!enabling) return;
     const track = publication?.track;
-    if (track && localTile) {
-      const el = document.createElement("video");
-      el.srcObject = new MediaStream([track.mediaStreamTrack]);
-      el.autoplay = true;
-      el.playsInline = true;
-      el.muted = true;
-      el.className = "voice-video-tile local local-camera";
-      localTile.querySelectorAll("img").forEach((image) => image.remove());
-      localTile.querySelector(".voice-placeholder")?.remove();
-      localTile.appendChild(el);
-      el.play?.().catch(() => {});
-    }
+    if (track && localTile)
+      attachVoicePreview(localTile, track.mediaStreamTrack, "voice-video-tile local local-camera", true);
+    voiceMediaVersion.value += 1;
   } catch (error) {
     voiceStatus.value = error?.message || "Could not access your camera. Check browser permissions.";
   }
@@ -1271,8 +1521,11 @@ async function testCamera() {
   try {
     cameraTestStream.value?.getTracks().forEach((track) => track.stop());
     const cameraDeviceId = String(settings.value.cameraDeviceId || "");
+    const cameraSizes = { "720p": { width: 1280, height: 720 }, "1080p": { width: 1920, height: 1080 }, "1440p": { width: 2560, height: 1440 }, "4K": { width: 3840, height: 2160 } };
+    const cameraSize = cameraSizes[settings.value.cameraQuality] || cameraSizes["1080p"];
+    const cameraFps = Number(settings.value.cameraFps || 30);
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : true,
+      video: { ...(cameraDeviceId ? { deviceId: { exact: cameraDeviceId } } : {}), width: { ideal: cameraSize.width }, height: { ideal: cameraSize.height }, frameRate: { ideal: cameraFps, max: cameraFps } },
     });
     cameraTestStream.value = stream;
     await nextTick();
@@ -1319,6 +1572,7 @@ async function toggleScreenShare() {
     delete voiceScreenTracks.value[sid];
     watchingScreens.value = watchingScreens.value.filter((item) => item !== sid);
     document.querySelector(`#voice-screen-${sid}`)?.remove();
+    voiceMediaVersion.value += 1;
   } catch (error) {
     voiceStatus.value = error?.message || "Could not stop screen sharing";
   }
@@ -1328,7 +1582,7 @@ async function startScreenShare() {
   try {
     if (isDesktopApp && selectedShareSource.value && window.libracordDesktop?.setDisplaySource)
       await window.libracordDesktop.setDisplaySource(selectedShareSource.value);
-    const resolutions = { "720p": { width: 1280, height: 720 }, "1080p": { width: 1920, height: 1080 }, "1440p": { width: 2560, height: 1440 } };
+    const resolutions = { "720p": { width: 1280, height: 720 }, "1080p": { width: 1920, height: 1080 }, "1440p": { width: 2560, height: 1440 }, "4K": { width: 3840, height: 2160 } };
     const size = resolutions[shareQuality.value];
     let stream;
     if (isDesktopApp && selectedShareSource.value) {
@@ -1354,29 +1608,30 @@ async function startScreenShare() {
       try { await videoTrack.applyConstraints({ frameRate: { ideal: Number(shareFps.value), max: Number(shareFps.value) } }); } catch {}
     }
     localScreenTrack.value = videoTrack;
-    const maxBitrate = shareQuality.value === "1440p" ? 9000000 : shareQuality.value === "1080p" ? 6000000 : 3500000;
+    const maxBitrate = shareQuality.value === "4K" ? 50_000_000 : shareQuality.value === "1440p" ? 24_000_000 : shareQuality.value === "1080p" ? 12_000_000 : 6_000_000;
     await voiceRoom.value.localParticipant.publishTrack(videoTrack, {
       source: Track.Source.ScreenShare,
       name: "screen",
+      videoCodec: preferredVideoCodec(),
       simulcast: true,
       videoEncoding: { maxBitrate, maxFramerate: Number(shareFps.value) },
       degradationPreference: "maintain-resolution",
     });
     const localSid = voiceRoom.value.localParticipant.sid;
     if (!voiceScreenShares.value.includes(localSid)) voiceScreenShares.value = [...voiceScreenShares.value, localSid];
+    voiceScreenTracks.value = {
+      ...voiceScreenTracks.value,
+      [localSid]: markRaw({ mediaStreamTrack: videoTrack }),
+    };
+    if (!watchingScreens.value.includes(localSid)) watchingScreens.value = [...watchingScreens.value, localSid];
+    voiceMediaVersion.value += 1;
     await nextTick();
     const localTile = document.querySelector(`#voice-screen-${localSid}`);
     if (localTile) {
       localTile.querySelector(".voice-placeholder")?.remove();
       localTile.querySelectorAll("img").forEach((image) => image.remove());
-      const element = document.createElement("video");
-      element.autoplay = true;
-      element.playsInline = true;
-      element.muted = true;
-      element.srcObject = new MediaStream([videoTrack]);
-      element.className = "voice-video-tile local-screen";
       localTile.classList.add("screen-tile");
-      localTile.appendChild(element);
+      attachVoicePreview(localTile, videoTrack, "voice-video-tile local-screen screen-share-video", true);
     }
     const audioTrack = stream.getAudioTracks()[0];
     if (audioTrack) await voiceRoom.value.localParticipant.publishTrack(audioTrack, { source: Track.Source.ScreenShareAudio, name: "screen-audio" });
@@ -1456,8 +1711,9 @@ async function openAdmin(tab = "instance") {
   error.value = "";
   if (tab === "instance") instanceForm.value = await api("/api/v1/instance");
   if (tab === "users")
-    adminUsers.value = (await api("/api/v1/admin/users")).users;
+    adminUsers.value = (await api("/api/v1/admin/users")).users.map((member) => ({ ...member, moderationReason: "", systemMessage: "" }));
   if (tab === "federation") peers.value = await api("/api/admin/federation");
+  if (tab === "moderation") adminModeration.value = await api("/api/v1/admin/moderation");
 }
 async function saveInstance() {
   try {
@@ -1483,6 +1739,59 @@ async function saveAdminUser(member) {
   } catch (e) {
     error.value = e.message;
   }
+}
+async function banAdminUser(member) {
+  const reason = String(member.moderationReason || "").trim();
+  if (!reason) { error.value = "Enter a reason before banning this account."; return; }
+  if (!confirm(`Ban ${member.display_name} from this instance?`)) return;
+  try {
+    await api(`/api/v1/admin/moderation/users/${encodeURIComponent(member.id)}/ban`, { method: "POST", body: JSON.stringify({ reason }) });
+    member.suspended = true;
+    member.moderationReason = "";
+    saved.value = `${member.display_name} was banned and signed out.`;
+  } catch (e) { error.value = e.message; }
+}
+async function sendAdminSystemMessage(member) {
+  const body = String(member.systemMessage || "").trim();
+  if (!body) { error.value = "Enter a system message first."; return; }
+  try {
+    await api(`/api/v1/admin/moderation/users/${encodeURIComponent(member.id)}/message`, {
+      method: "POST", body: JSON.stringify({ subject: "Message from instance moderation", body }),
+    });
+    member.systemMessage = "";
+    saved.value = `System message sent to ${member.display_name}.`;
+  } catch (e) { error.value = e.message; }
+}
+async function updateModerationReport(report, status) {
+  const resolution = status === "dismissed" || status === "actioned" ? prompt("Resolution note") : "";
+  if ((status === "dismissed" || status === "actioned") && resolution === null) return;
+  try {
+    const result = await api(`/api/v1/admin/moderation/reports/${report.id}`, {
+      method: "PATCH", body: JSON.stringify({ status, resolution: resolution || report.resolution || "" }),
+    });
+    Object.assign(report, result.report);
+  } catch (e) {
+    error.value = e.message;
+    adminModeration.value = await api("/api/v1/admin/moderation");
+  }
+}
+async function unbanAdminUser(ban) {
+  try {
+    await api(`/api/v1/admin/moderation/users/${encodeURIComponent(ban.user_id)}/ban`, { method: "DELETE" });
+    adminModeration.value.bans = adminModeration.value.bans.filter((item) => item.user_id !== ban.user_id);
+  } catch (e) { error.value = e.message; }
+}
+async function reportUserFromMenu() {
+  const target = userMenu.value;
+  if (!target?.id || target.id === user.value.id) return;
+  const description = prompt(`Tell the instance moderators why you are reporting ${target.name || "this user"}:`);
+  if (description === null || !description.trim()) return;
+  try {
+    await api("/api/v1/reports", { method: "POST", body: JSON.stringify({ targetType: "user", targetId: target.id,
+      category: "user-report", description: description.trim(), evidence: { community_id: activeCommunityId.value, channel_id: selected.value?.id || null } }) });
+    saved.value = "Report sent to the instance moderation team.";
+  } catch (e) { error.value = e.message; }
+  userMenu.value = null;
 }
 async function createGuild() {
   try {
@@ -1619,7 +1928,7 @@ async function joinFromInvite() {
   const result = await api(`/api/v1/invites/${invitePreview.value.code}/join`, {
     method: "POST",
   });
-  communities.value = await api("/api/communities");
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
   const joined = communities.value.find(
     (guild) => guild.id === result.invite.guild_id,
   );
@@ -1942,6 +2251,8 @@ async function openGuildSettings(tab = "overview") {
     bannerUrl: activeCommunity.value.banner_url || "",
     profile: {
       bannerColor: activeCommunity.value.profile?.bannerColor || "#7857ff",
+      memberTag: activeCommunity.value.profile?.memberTag || "",
+      memberTagEmoji: activeCommunity.value.profile?.memberTagEmoji || "",
       traits: [
         ...(activeCommunity.value.profile?.traits || []),
         "",
@@ -2403,8 +2714,19 @@ async function uploadProfileImage(kind, file) {
   }
 }
 function applyAppearance() {
-  document.documentElement.dataset.theme = settings.value.theme;
-  document.documentElement.classList.toggle("compact", settings.value.compact);
+  const root = document.documentElement;
+  const preferredTheme = settings.value.theme === "system"
+    ? (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark")
+    : settings.value.theme;
+  root.dataset.theme = preferredTheme;
+  root.dataset.density = settings.value.density || (settings.value.compact ? "compact" : "default");
+  root.dataset.messageSpacing = settings.value.messageSpacing || "comfortable";
+  root.style.setProperty("--lc-accent", settings.value.accentColor || "#8b5cf6");
+  root.style.setProperty("--lc-text-scale", `${settings.value.textSize || 100}%`);
+  root.classList.toggle("compact", settings.value.compact || settings.value.density === "compact");
+  root.classList.toggle("reduce-motion", Boolean(settings.value.reducedMotion));
+  root.classList.toggle("high-contrast", Boolean(settings.value.increasedContrast));
+  root.classList.toggle("reduce-transparency", Boolean(settings.value.reducedTransparency));
 }
 async function saveSettings() {
   error.value = "";
@@ -2478,6 +2800,10 @@ socket.on("message:created", (message) => {
     });
   }
 });
+socket.on("voice:message:created", (message) => {
+  if (message.channel_id === voiceRoom.value?.__channelId && !voiceMessages.value.some((item) => item.id === message.id))
+    voiceMessages.value.push(message);
+});
 socket.on("voice:presence-changed", (communityId) => {
   if (String(communityId) === String(activeCommunityId.value)) refreshVoicePresence();
 });
@@ -2495,14 +2821,14 @@ socket.on("community:changed", ({ communityId } = {}) => {
   refreshCommunityFromServer(communityId);
 });
 socket.on("federation:membership", async () => {
-  communities.value = await api("/api/communities");
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
   if (homeTab.value === "discover") discoverCommunities.value = (await api("/api/v1/discovery/communities")).communities;
 });
 socket.on("federation:community-deleted", async () => {
-  communities.value = await api("/api/communities");
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
 });
 socket.on("federation:community-changed", async () => {
-  communities.value = await api("/api/communities");
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
 });
 socket.on("dm:created", async (message) => {
   const otherId = message.sender_id === user.value.id ? message.recipient_id : message.sender_id;
@@ -2510,10 +2836,13 @@ socket.on("dm:created", async (message) => {
   const isActiveDm = page.value === "home" && homeTab.value === "dm" && dmTarget.value?.id === otherId;
   if (!isActiveDm && !isOwnMessage) {
     dmUnread.value += 1;
-    const sender = friends.value.find((friend) => friend.id === otherId);
-    showDesktopNotification(message.author_name || sender?.display_name || "New direct message", "Open LibraCord to read this encrypted message.", () => {
-      if (sender) openDm(sender);
-      else openHome("dm");
+    const sender = friends.value.find((friend) => friend.id === otherId) || openDmUsers.value.find((friend) => friend.id === otherId) || {
+      id: otherId, username: message.username || "system", display_name: message.author_name || "LibraCord System",
+      avatar_url: message.avatar_url || "", banner_url: message.banner_url || "", system: message.kind === "system",
+    };
+    if (!openDmUsers.value.some((contact) => contact.id === sender.id)) openDmUsers.value.unshift(sender);
+    showDesktopNotification(message.author_name || sender?.display_name || "New direct message", message.kind === "system" ? "Official message from your LibraCord instance." : "Open LibraCord to read this encrypted message.", () => {
+      openDm(sender);
     });
     playUiSound("message");
     return;
@@ -2526,6 +2855,17 @@ socket.on("dm:encrypted", (message) => {
   const sender = String(message?.sender_global_id || "Remote user");
   showDesktopNotification(`Encrypted message from ${sender}`, "Open LibraCord to verify the sender key and decrypt this message.", () => openHome("dm"));
   playUiSound("message");
+});
+socket.on("moderation:report-created", async () => {
+  if (page.value === "admin" && adminTab.value === "moderation") adminModeration.value = await api("/api/v1/admin/moderation");
+});
+socket.on("account:banned", ({ reason } = {}) => {
+  error.value = `Your account was banned: ${reason || "Contact the instance administrator."}`;
+  connectionState.value = "disconnected";
+  connectionDetail.value = "Account banned";
+  socket.disconnect();
+  user.value = null;
+  appBooting.value = false;
 });
 socket.on("dm:call-invite", ({ callerId, callerName, mode, callId } = {}) => {
   incomingDmCall.value = { callerId, callerName, mode: mode || "video", callId };
@@ -2545,6 +2885,7 @@ socket.on("typing:update", ({ channelId, userId, name, typing }) => {
 socket.on("connect", () => {
   connectionState.value = "connected";
   connectionDetail.value = "Connected";
+  if (voiceRoom.value?.__channelId) socket.emit("voice-chat:join", voiceRoom.value.__channelId);
 });
 socket.on("disconnect", (reason) => {
   if (reason === "io client disconnect") return;
@@ -2560,6 +2901,7 @@ socket.on("connect_error", () => {
     : "The server is unavailable. Retrying…";
 });
 onMounted(async () => {
+  window.addEventListener("keydown", handleLightboxKey);
   try {
     const codecs = window.RTCRtpSender?.getCapabilities?.("audio")?.codecs || [];
     const seen = new Set();
@@ -2586,6 +2928,7 @@ onMounted(async () => {
   });
 });
 onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleLightboxKey);
   clearInterval(networkTimer);
   dockObserver?.disconnect();
   document.removeEventListener("contextmenu", showAppMenu);
@@ -2724,6 +3067,21 @@ watch(
       <button class="home-orbit dm-button" :class="{ active: page === 'home' && homeTab === 'dm' }" title="Direct messages" @click="openHome('dm')">
         <FontAwesomeIcon :icon="faComments" /><b v-if="dmUnread" class="dm-unread-badge">{{ dmUnread > 9 ? '9+' : dmUnread }}</b>
       </button>
+      <div class="workspace-divider" aria-hidden="true"></div>
+      <div class="workspace-list" aria-label="Communities">
+        <button
+          v-for="guild in communities"
+          :key="`rail-${guild.id}`"
+          class="workspace-orbit"
+          :class="{ active: page === 'chat' && activeCommunity?.id === guild.id, unread: unreadCommunities[guild.id] }"
+          :title="guild.name"
+          @click="chooseGuild(guild)"
+        >
+          <img v-if="guild.icon_url" :src="guild.icon_url" alt="" />
+          <span v-else>{{ guild.name?.[0]?.toUpperCase() || 'L' }}</span>
+          <i v-if="unreadCommunities[guild.id]"></i>
+        </button>
+      </div>
       <button
         v-if="compactCommunityDock"
         class="dock-arrow"
@@ -2813,7 +3171,7 @@ watch(
           @click="openProfile(user.id, 'self')"
           @keydown.enter="openProfile(user.id, 'self')"
         >
-          <strong>{{ user.display_name }}</strong
+          <strong>{{ user.display_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong
           ><small>{{ user.handle }}</small>
         </div>
         <div class="user-controls">
@@ -2875,6 +3233,11 @@ watch(
               : activeCommunity?.description
           }}
         </p>
+        <label v-if="page === 'chat'" class="channel-search">
+          <FontAwesomeIcon :icon="faHashtag" />
+          <span class="sr-only">Browse channels</span>
+          <input v-model="channelSearch" placeholder="Browse channels" />
+        </label>
       </header>
       <template v-if="page === 'chat'">
         <section v-for="group in sidebarChannelGroups" :key="group.id" class="channel-category-group">
@@ -2893,10 +3256,11 @@ watch(
             <FontAwesomeIcon :icon="channel.kind === 'text' ? faHashtag : faVolumeHigh" />{{ channel.name }}
           </button>
           <div v-if="channel.kind === 'voice' && channelPresence(channel).length" class="voice-channel-members">
-            <div v-for="participant in channelPresence(channel)" :key="`sidebar-${channel.id}-${participant.identity}`">
-              <span class="voice-member-dot"></span>
-              <img v-if="participant.avatar" :src="participant.avatar" alt="" />
-              <span>{{ participant.name }}</span>
+            <div v-for="participant in channelPresence(channel)" :key="`sidebar-${channel.id}-${participant.identity}`" class="voice-channel-member" :class="{ speaking: participant.speaking, 'has-banner': participant.banner }" :style="participant.banner ? { '--voice-sidebar-banner': `url(${participant.banner})` } : {}">
+              <span class="voice-sidebar-avatar"><img v-if="participant.avatar" :src="participant.avatar" alt="" /><b v-else>{{ participant.name?.[0]?.toUpperCase() || '?' }}</b><i></i></span>
+              <strong>{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
+              <span class="voice-sidebar-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i></span>
+              <span class="voice-sidebar-media"><FontAwesomeIcon v-if="participant.camera" :icon="faCamera" title="Camera on" /><FontAwesomeIcon v-if="participant.screen" :icon="faDisplay" title="Sharing screen" /><FontAwesomeIcon v-if="participant.muted" :icon="faMicrophoneSlash" title="Muted" /></span>
             </div>
           </div>
           </template>
@@ -2923,6 +3287,12 @@ watch(
           >
             <FontAwesomeIcon :icon="faServer" />Federation
           </button>
+          <button
+            :class="{ selected: adminTab === 'moderation' }"
+            @click="openAdmin('moderation')"
+          >
+            <FontAwesomeIcon :icon="faShieldHalved" />Moderation
+          </button>
           <button @click="page = 'chat'">
             <FontAwesomeIcon :icon="faArrowLeft" />Back to chat
           </button>
@@ -2932,9 +3302,9 @@ watch(
           <span class="label">DIRECT MESSAGES</span>
           <button v-for="friend in openDmUsers" :key="`open-dm-${friend.id}`" class="dm-nav-contact" :class="{ selected: dmTarget?.id === friend.id, 'has-dm-banner': friend.banner_url }" :style="friend.banner_url ? { '--dm-banner': `url(${friend.banner_url})` } : {}" @click="openDm(friend)">
             <span class="dm-nav-avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}<i></i></span>
-            <span><strong :style="usernameThemeStyle(friend)">{{ friend.display_name }}</strong><small>@{{ friend.username }}</small><em>{{ friend.status_text || 'Online' }}</em></span><i class="dm-online-dot"></i>
+            <span><strong :style="usernameThemeStyle(friend)">{{ friend.display_name }} <span v-if="communityMemberTag.text && !friend.system" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span> <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>@{{ friend.username }}</small><em>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</em></span><i class="dm-online-dot"></i>
           </button>
-          <p v-if="!friends.length" class="empty">No open conversations yet.</p>
+          <p v-if="!openDmUsers.length" class="empty">No open conversations yet.</p>
         </section></template
       ><template v-else
         ><section class="home-navigation">
@@ -2977,9 +3347,12 @@ watch(
     </aside>
     <section v-if="page === 'chat'" class="chat" :class="{ 'voice-fullscreen': voiceRoom && selected?.id === voiceRoom.__channelId }">
       <header>
-        <strong v-if="selected?.kind === 'voice'">{{ voiceRoom ? "Voice & video" : "Voice channel" }} · {{ selected?.name }}</strong>
-        <strong v-else># {{ selected?.name || "Choose a channel" }}</strong
-        ><span>LibraCord</span>
+        <div v-if="selected?.kind === 'voice'" class="voice-channel-heading">
+          <strong>{{ selected?.name }}</strong>
+          <small>{{ voiceRoom ? `${voiceParticipants.length} ${voiceParticipants.length === 1 ? 'person' : 'people'} connected` : `${channelPresence(selected).length} ${channelPresence(selected).length === 1 ? 'person' : 'people'} connected` }}</small>
+        </div>
+        <div v-else class="text-channel-heading"><strong># {{ selected?.name || "Choose a channel" }}</strong><small>{{ selected?.topic || "Good people. Brighter ideas." }}</small></div
+        ><button v-if="focusedVoiceParticipant && voiceRoom && selected?.id === voiceRoom.__channelId" class="voice-back-grid" type="button" @click="focusedVoiceParticipant = null">← Back to grid</button><div v-if="selected?.kind !== 'voice'" class="channel-header-actions"><label><span class="sr-only">Search this channel</span><input v-model="messageSearch" :placeholder="`Search in #${selected?.name || 'channel'}`" /></label><button type="button" title="Toggle member list" aria-label="Toggle member list" @click="membersPanelOpen = !membersPanelOpen"><FontAwesomeIcon :icon="faUsers" /></button></div><span v-else>LibraCord</span>
       </header>
       <div v-if="voiceRoom" class="voice-presence-rail">
         <button
@@ -2995,12 +3368,37 @@ watch(
           <span v-else>{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
         </button>
       </div>
-      <div v-if="!voiceRoom || selected?.id !== voiceRoom.__channelId" class="messages">
+      <div v-if="selected?.kind === 'text'" class="messages">
+        <section v-if="selected?.kind === 'text' && !displayedMessages.length" class="channel-empty-state">
+          <span>#</span>
+          <h2>Welcome to #{{ selected?.name }}</h2>
+          <p>This is the beginning of the {{ selected?.name }} channel.</p>
+        </section>
         <article
-          v-for="message in messages"
+          v-for="message in displayedMessages"
           :key="message.id"
+          :ref="(element) => setMessageElement(message.id, element)"
+          :class="{ 'has-message-reply': repliedMessage(message) }"
           @contextmenu.stop="showUserMenu($event, message)"
         >
+          <button
+            v-if="repliedMessage(message)"
+            class="message-reply-reference"
+            type="button"
+            :title="repliedMessage(message).body"
+            @click="jumpToMessage(repliedMessage(message).id)"
+          >
+            <span class="message-reply-avatar">
+              <img
+                v-if="messageAuthor(repliedMessage(message))?.avatar_url"
+                :src="messageAuthor(repliedMessage(message)).avatar_url"
+                alt=""
+              />
+              <b v-else>{{ repliedMessage(message).author_name?.[0] || '?' }}</b>
+            </span>
+            <strong :style="usernameThemeStyle(messageAuthor(repliedMessage(message)))">{{ repliedMessage(message).author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
+            <span>{{ repliedMessage(message).body || 'Attachment' }}</span>
+          </button>
           <button
             class="message-avatar"
             @click="openProfile(message.author_id)"
@@ -3019,7 +3417,7 @@ watch(
               :style="usernameThemeStyle(messageAuthor(message))"
               @click="openProfile(message.author_id)"
             >
-              {{ message.author_name }}</button
+              {{ message.author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></button
             ><time>{{
               new Date(message.created_at).toLocaleTimeString([], {
                 hour: "2-digit",
@@ -3045,21 +3443,39 @@ watch(
             <div v-if="message.content_warning" class="message-warning">{{ message.content_warning }}</div>
             <div v-if="message.attachments?.length" class="message-attachments">
               <figure v-for="attachment in message.attachments" :key="attachment.id" class="message-attachment">
-                <img :class="{ blurred: message.content_warning && !revealedAttachments[`${message.id}:${attachment.id}`] }" :src="attachment.url" :alt="attachment.name" />
+                <img :class="{ blurred: message.content_warning && !revealedAttachments[`${message.id}:${attachment.id}`] }" :src="apiEndpoint(attachment.url)" :alt="attachment.name" tabindex="0" role="button" @click="(!message.content_warning || revealedAttachments[`${message.id}:${attachment.id}`]) && openImageLightbox(attachment.url, attachment.name)" @keydown.enter="(!message.content_warning || revealedAttachments[`${message.id}:${attachment.id}`]) && openImageLightbox(attachment.url, attachment.name)" />
                 <button v-if="message.content_warning" type="button" class="attachment-reveal" :title="revealedAttachments[`${message.id}:${attachment.id}`] ? 'Hide image' : 'Show image'" @click="toggleAttachment(message.id, attachment.id)"><FontAwesomeIcon :icon="revealedAttachments[`${message.id}:${attachment.id}`] ? faEyeSlash : faEye" /> {{ revealedAttachments[`${message.id}:${attachment.id}`] ? 'Hide image' : 'Show image' }}</button>
                 <figcaption>{{ attachment.name }}</figcaption>
               </figure>
             </div>
+            <div class="message-reactions">
+              <button
+                v-for="reaction in messageReactions[message.id] || []"
+                :key="reaction"
+                class="message-reaction-pill selected"
+                type="button"
+                :title="`Remove ${reaction} reaction`"
+                @click="reactToMessage(message, reaction)"
+              >
+                <img v-if="reactionCustomEmoji(reaction)" :src="reactionCustomEmoji(reaction).url" :alt="reaction" />
+                <span v-else>{{ reaction }}</span>
+                <b>1</b>
+              </button>
+              <button
+                class="message-add-reaction"
+                type="button"
+                title="Add reaction"
+                aria-label="Add reaction"
+                @click="openReactionPicker(message)"
+              >+</button>
+            </div>
             <div class="message-actions">
-              <button type="button" @click="reactionMessageId = reactionMessageId === message.id ? null : message.id">☺ React</button>
-              <span v-if="reactionMessageId === message.id" class="reaction-picker"><button v-for="emoji in ['❤️','😂','👍','🎉','😮','😢']" :key="emoji" type="button" @click="reactToMessage(message, emoji); reactionMessageId = null">{{ emoji }}</button><button v-for="emoji in allCustomEmojis.slice(0, 8)" :key="`custom-${emoji.id}`" type="button" :title="`:${emoji.name}:`" @click="reactToMessage(message, `:${emoji.name}:`); reactionMessageId = null"><img :src="emoji.url" :alt="emoji.name" /></button></span>
               <button type="button" @click="replyTo = message">↩ Reply</button>
-              <span v-if="messageReactions[message.id]?.length">{{ messageReactions[message.id].join(" ") }}</span>
             </div>
           </div>
         </article>
       </div>
-      <div v-if="voiceRoom" id="voice-stage" class="voice-stage" :class="{ 'voice-floating': page !== 'chat' || selected?.id !== voiceRoom.__channelId }" :style="voiceFloatingStyle" @pointerdown="startVoiceStageDrag">
+      <div v-if="voiceRoom" id="voice-stage" class="voice-stage" :class="{ 'voice-floating': page !== 'chat' || selected?.id !== voiceRoom.__channelId, 'voice-stage-focused': focusedVoiceParticipant }" :style="voiceFloatingStyle" @pointerdown="startVoiceStageDrag">
         <button
           v-for="participant in visibleVoiceVisuals"
           :id="voiceTileId(participant)"
@@ -3074,21 +3490,43 @@ watch(
           :style="{ '--voice-color': participant.color }"
           @click="focusVoiceParticipant(participant)"
         >
-          <img v-if="participant.avatar && !participant.isScreen" :src="participant.avatar" alt="" />
+          <span v-if="participant.banner && !participant.isScreen" class="voice-profile-banner" :style="{ backgroundImage: `url(${participant.banner})` }"></span>
+          <img v-if="participant.avatar && !participant.isScreen" class="voice-profile-avatar" :src="participant.avatar" alt="" />
           <span v-else class="voice-placeholder">{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
           <span v-if="participant.isScreen && !watchingScreens.includes(participant.participantSid)" class="screen-watch-control" @click.stop="watchScreen(participant)">▶ Watch screen</span>
           <span class="voice-name">{{ participant.isScreen ? `${participant.identity} · Screen` : `${participant.identity}${participant.local ? " (you)" : ""}` }}</span>
-          <span v-if="voiceActiveSpeakers.includes(participant.participantSid || participant.sid)" class="voice-speaking">Speaking</span>
+          <span v-if="!participant.isScreen" class="voice-activity" :class="{ active: voiceActiveSpeakers.includes(participant.participantSid || participant.sid) }" aria-label="Voice activity"><i></i><i></i><i></i><i></i></span>
+        </button>
+        <button v-if="!focusedVoiceParticipant && selected?.id === voiceRoom.__channelId" class="voice-invite-tile" type="button" @click="openGuildSettings('invites')">
+          <span>＋</span><strong>Invite someone</strong><small>Share this room with friends</small>
+        </button>
+      </div>
+      <div v-else-if="selected?.kind === 'voice'" class="voice-stage voice-lobby-stage">
+        <div v-if="voiceConnecting" class="voice-participant-tile voice-connecting-tile" :style="{ '--voice-color': user?.accent_color || '#8b5cf6' }">
+          <img v-if="user?.avatar_url" :src="user.avatar_url" alt="" />
+          <span v-else class="voice-placeholder">{{ user?.display_name?.[0]?.toUpperCase() || '?' }}</span>
+          <span class="voice-name">{{ user?.display_name || 'You' }} (you)</span>
+          <span class="voice-connecting-state">{{ voiceStatus || 'Connecting…' }}</span>
+        </div>
+        <div v-else v-for="participant in channelPresence(selected)" :key="`lobby-${participant.identity}`" class="voice-participant-tile" :class="{ speaking: participant.speaking }" :style="{ '--voice-color': participant.color || '#8b5cf6' }">
+          <span v-if="participant.banner" class="voice-profile-banner" :style="{ backgroundImage: `url(${participant.banner})` }"></span>
+          <img v-if="participant.avatar" class="voice-profile-avatar" :src="participant.avatar" alt="" />
+          <span v-else class="voice-placeholder">{{ participant.name?.[0]?.toUpperCase() || '?' }}</span>
+          <span class="voice-name">{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></span>
+          <span class="voice-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i><i></i></span>
+        </div>
+        <button v-if="!voiceConnecting" class="voice-invite-tile voice-join-tile" type="button" @click="joinVoice(selected)">
+          <span>♪</span><strong>Join {{ selected.name }}</strong><small v-if="channelPresence(selected).length">Join the conversation</small><small v-else>No one is connected yet</small>
         </button>
       </div>
       <div v-if="voiceRoom && selected?.id === voiceRoom.__channelId" class="voice-bottom-toolbar">
-        <button :title="micMuted ? 'Unmute' : 'Mute'" :aria-label="micMuted ? 'Unmute' : 'Mute'" @click="toggleMic"><FontAwesomeIcon :icon="micMuted ? faMicrophoneSlash : faMicrophone" /></button>
-        <button :title="voiceRoom.localParticipant.isCameraEnabled ? 'Camera off' : 'Camera'" aria-label="Camera" @click="toggleCamera"><FontAwesomeIcon :icon="faCamera" /></button>
-        <button title="Share screen" aria-label="Share screen" @click="toggleScreenShare"><FontAwesomeIcon :icon="faDisplay" /></button>
-        <button title="Firefox browser" aria-label="Firefox browser" @click="startSharedBrowser"><FontAwesomeIcon :icon="faDisplay" /></button>
-        <button :title="voicePanelOpen ? 'Hide chat' : 'Side chat'" :aria-label="voicePanelOpen ? 'Hide chat' : 'Side chat'" @click="voicePanelOpen = !voicePanelOpen"><FontAwesomeIcon :icon="faComments" /></button>
-        <button title="Network diagnostics" aria-label="Network diagnostics" @click="networkPanelOpen = !networkPanelOpen; refreshNetworkStats()"><FontAwesomeIcon :icon="faChartSimple" /></button>
-        <button class="hangup" title="Leave voice" aria-label="Leave voice" @click="leaveVoice"><FontAwesomeIcon :icon="faPhoneSlash" /></button>
+        <button :title="micMuted ? 'Unmute' : 'Mute'" :aria-label="micMuted ? 'Unmute' : 'Mute'" :data-label="micMuted ? 'Unmute' : 'Mute'" @click="toggleMic"><FontAwesomeIcon :icon="micMuted ? faMicrophoneSlash : faMicrophone" /></button>
+        <button :title="voiceRoom.localParticipant.isCameraEnabled ? 'Camera off' : 'Camera'" aria-label="Camera" data-label="Camera" @click="toggleCamera"><FontAwesomeIcon :icon="faCamera" /></button>
+        <button title="Share screen" aria-label="Share screen" data-label="Share" @click="toggleScreenShare"><FontAwesomeIcon :icon="faDisplay" /></button>
+        <button title="Firefox browser" aria-label="Firefox browser" data-label="Browser" @click="startSharedBrowser"><FontAwesomeIcon :icon="faDisplay" /></button>
+        <button :title="voicePanelOpen ? 'Hide chat' : 'Side chat'" :aria-label="voicePanelOpen ? 'Hide chat' : 'Side chat'" data-label="Chat" @click="voicePanelOpen = !voicePanelOpen"><FontAwesomeIcon :icon="faComments" /></button>
+        <button title="Network diagnostics" aria-label="Network diagnostics" data-label="Network" @click="networkPanelOpen = !networkPanelOpen; refreshNetworkStats()"><FontAwesomeIcon :icon="faChartSimple" /></button>
+        <button class="hangup" title="Leave voice" aria-label="Leave voice" data-label="Disconnect" @click="leaveVoice"><FontAwesomeIcon :icon="faPhoneSlash" /></button>
       </div>
       <aside v-if="voiceRoom && networkPanelOpen" class="network-panel">
         <strong>Connection diagnostics</strong>
@@ -3100,15 +3538,30 @@ watch(
         <iframe :src="browserSession.url" title="Shared Firefox browser" allow="autoplay; fullscreen"></iframe>
       </div>
       <aside v-if="voiceRoom && voicePanelOpen" class="voice-side-chat">
-        <header><strong>Voice side chat</strong><button @click="voicePanelOpen = false">×</button></header>
+        <header><div><strong>{{ voiceChatChannelName || 'Voice' }} chat</strong><small>Only for this voice channel</small></div><button @click="voicePanelOpen = false">×</button></header>
         <div class="voice-side-messages">
-          <article v-for="message in messages" :key="`voice-${message.id}`"><strong>{{ message.author_name }}</strong><p>{{ message.body }}</p></article>
+          <p v-if="!voiceMessages.length" class="voice-chat-empty">No messages yet. Start the voice chat.</p>
+          <article v-for="message in voiceMessages" :key="`voice-${message.id}`">
+            <strong>{{ message.author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong><p v-if="message.body">{{ message.body }}</p>
+            <div v-if="message.attachments?.length" class="voice-message-attachments">
+              <template v-for="attachment in message.attachments" :key="attachment.id">
+                <button v-if="attachment.mimeType?.startsWith('image/')" type="button" class="voice-image-button" @click="openImageLightbox(attachment.url, attachment.name)"><img :src="apiEndpoint(attachment.url)" :alt="attachment.name" /></button>
+                <a v-else class="voice-file-card" :href="apiEndpoint(attachment.url)" target="_blank" rel="noopener" download><span>↧</span><div><strong>{{ attachment.name || 'Download file' }}</strong><small>{{ attachment.mimeType || 'File' }}</small></div></a>
+              </template>
+            </div>
+          </article>
         </div>
+        <form class="voice-chat-composer" @submit.prevent="sendVoiceMessage">
+          <div v-if="voicePendingAttachments.length" class="voice-upload-queue"><span v-for="(attachment, index) in voicePendingAttachments" :key="attachment.id">{{ attachment.name }}<button type="button" @click="voicePendingAttachments.splice(index, 1)">×</button></span></div>
+          <label class="voice-upload-button" title="Upload a photo or file">＋<input type="file" @change="uploadVoiceAttachment" /></label>
+          <input v-model="voiceDraft" maxlength="4000" :placeholder="`Message ${voiceChatChannelName || 'voice channel'}`" />
+          <button type="submit" :disabled="!voiceDraft.trim() && !voicePendingAttachments.length">Send</button>
+        </form>
       </aside>
       <aside v-if="emojiPickerOpen" class="emoji-picker">
         <header>
           <input v-model="emojiSearch" placeholder="Find the perfect emoji" />
-          <button @click="emojiPickerOpen = false">×</button>
+          <button @click="closeEmojiPicker">×</button>
         </header>
         <div class="emoji-scroll">
           <section v-if="federatedGuildEmojis.length" class="emoji-category">
@@ -3185,7 +3638,7 @@ watch(
         <label><FontAwesomeIcon :icon="faDisplay" /> Upload a file<input type="file" accept="image/png,image/jpeg,image/gif" @change="uploadMessageAttachment($event); composerMenuOpen = false" /></label>
       </div>
       <div v-if="selected?.kind === 'text' && Object.keys(typingUsers[selected.id] || {}).length" class="typing-indicator"><template v-if="Object.keys(typingUsers[selected.id]).length <= 3">{{ Object.values(typingUsers[selected.id]).join(', ') }} {{ Object.keys(typingUsers[selected.id]).length === 1 ? 'is' : 'are' }} typing</template><template v-else>Multiple people are typing</template></div>
-      <form v-if="!voiceRoom || selected?.id !== voiceRoom.__channelId" @submit.prevent="sendMessage">
+      <form v-if="selected?.kind === 'text'" @submit.prevent="sendMessage">
         <button type="button" class="attachment-button" title="More message options" @click="composerMenuOpen = !composerMenuOpen">＋</button>
         <div v-if="pendingAttachments.length" class="attachment-previews"><span v-for="attachment in pendingAttachments" :key="attachment.id"><img :src="attachment.url" :alt="attachment.name" /><button type="button" :class="{ active: contentWarning }" @click="contentWarning = contentWarning ? '' : 'Content warning'">{{ contentWarning ? 'Content warning' : 'Mark as content warning' }}</button></span></div>
         <input
@@ -3196,7 +3649,7 @@ watch(
           type="button"
           class="emoji-trigger"
           title="Choose emoji"
-          @click="emojiPickerOpen = !emojiPickerOpen"
+          @click="toggleComposerEmojiPicker"
         >
           ☺</button
         ><button>Send</button>
@@ -3204,8 +3657,8 @@ watch(
     </section>
     <div v-if="shareDialogOpen" class="dialog-layer" @click.self="shareDialogOpen = false">
       <section class="dialog-card share-dialog"><span class="label">VOICE & VIDEO</span><h2>Share your screen</h2><p>Choose how you want your screen to appear to everyone in the channel.</p>
-        <label>Quality<select v-model="shareQuality"><option>720p</option><option>1080p</option><option>1440p</option></select></label>
-        <label>Frame rate<select v-model="shareFps"><option :value="15">15 FPS</option><option :value="30">30 FPS</option><option :value="60">60 FPS</option></select></label>
+        <label>Quality<select v-model="shareQuality"><option>720p</option><option>1080p</option><option>1440p</option><option>4K</option></select></label>
+        <label>Frame rate<select v-model="shareFps"><option :value="15">15 FPS</option><option :value="30">30 FPS</option><option :value="60">60 FPS</option><option :value="120">120 FPS</option><option :value="144">144 FPS</option><option :value="145">145 FPS</option></select></label>
         <label class="check-row"><input v-model="shareAudio" type="checkbox" /> Include system audio</label>
         <div v-if="isDesktopApp && shareSources.length" class="share-source-picker">
           <nav class="share-source-tabs"><button type="button" :class="{ active: shareSourceTab === 'applications' }" @click="shareSourceTab = 'applications'">▣ Applications</button><button type="button" :class="{ active: shareSourceTab === 'screens' }" @click="shareSourceTab = 'screens'">▰ Entire Screen</button><button type="button" :class="{ active: shareSourceTab === 'devices' }" @click="shareSourceTab = 'devices'">◉ Devices</button></nav>
@@ -3227,7 +3680,9 @@ watch(
                 ? "Home instance"
                 : adminTab === "users"
                   ? "Users"
-                  : "Federation"
+                  : adminTab === "moderation"
+                    ? "Moderation"
+                    : "Federation"
             }}
           </h2>
           <p>
@@ -3236,7 +3691,9 @@ watch(
                 ? "Configure public identity, registrations, limits, and moderation defaults."
                 : adminTab === "users"
                   ? "Manage local accounts and administrator access."
-                  : "Choose which remote LibraCord instances this server trusts."
+                  : adminTab === "moderation"
+                    ? "Review reports, active bans, and instance moderation history."
+                    : "Choose which remote LibraCord instances this server trusts."
             }}
           </p>
         </div>
@@ -3378,7 +3835,39 @@ watch(
             >
               Save
             </button>
+            <div v-if="member.role !== 'owner'" class="admin-user-moderation">
+              <input v-model="member.moderationReason" maxlength="1000" placeholder="Reason for instance ban" />
+              <button class="danger" @click="banAdminUser(member)">Ban from instance</button>
+              <textarea v-model="member.systemMessage" maxlength="12000" rows="2" placeholder="Message from the instance system account"></textarea>
+              <button @click="sendAdminSystemMessage(member)">Send system DM</button>
+            </div>
           </article>
+        </div>
+        <div v-else-if="adminTab === 'moderation'" class="moderation-dashboard">
+          <section>
+            <h3>Active instance bans</h3>
+            <article v-for="ban in adminModeration.bans" :key="ban.user_id">
+              <div><strong>{{ ban.display_name }}</strong><small>@{{ ban.username }} · {{ ban.reason }}</small></div>
+              <time>{{ new Date(ban.created_at).toLocaleString() }}</time>
+              <button @click="unbanAdminUser(ban)">Unban</button>
+            </article>
+            <p v-if="!adminModeration.bans.length" class="empty">No active instance bans.</p>
+          </section>
+          <section>
+            <h3>User reports</h3>
+            <article v-for="report in adminModeration.reports" :key="report.id">
+              <div><strong>{{ report.category }} · {{ report.target_type }}</strong><small>{{ report.reporter_name }} reported {{ report.target_id }}</small><p>{{ report.description }}</p></div>
+              <select v-model="report.status" @change="updateModerationReport(report, report.status)"><option value="open">Open</option><option value="reviewing">Reviewing</option><option value="actioned">Actioned</option><option value="dismissed">Dismissed</option></select>
+            </article>
+            <p v-if="!adminModeration.reports.length" class="empty">No reports waiting for review.</p>
+          </section>
+          <section>
+            <h3>Moderation history</h3>
+            <article v-for="action in adminModeration.actions" :key="action.id">
+              <div><strong>{{ action.action.replaceAll('_', ' ') }}</strong><small>{{ action.moderator_name || 'System' }} · {{ action.target_name || action.target_user_id || 'Report' }}</small><p v-if="action.reason">{{ action.reason }}</p></div>
+              <time>{{ new Date(action.created_at).toLocaleString() }}</time>
+            </article>
+          </section>
         </div>
         <template v-else>
           <form class="peer-form" @submit.prevent="addPeer">
@@ -3422,9 +3911,9 @@ watch(
           <aside class="notice">
             <strong>Federation protocol status</strong>
             <p>
-              Allowed instances contribute public posts, creations, assets, and
-              community discovery. Private membership and message delivery stay
-              local until signed cross-instance events are configured.
+              Allowed instances exchange signed, replay-safe federation events.
+              Review local reports here and use peer policies to restrict abusive
+              remote instances.
             </p>
           </aside>
         </template>
@@ -3453,7 +3942,7 @@ watch(
           >
         </div>
       </header>
-      <div v-if="homeTab === 'dm'" class="dm-page"><aside class="dm-sidebar"><input placeholder="Find or start a conversation" /><h3>Direct Messages</h3><button v-for="friend in friends" :key="friend.id" class="dm-contact" :class="{ active: dmTarget?.id === friend.id }" @click="openDm(friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><strong>{{ friend.display_name }}</strong><small>{{ friend.status_text || 'Online' }}</small></button></aside><section class="dm-conversation"><header><span class="avatar"><img v-if="dmTarget?.avatar_url" :src="dmTarget.avatar_url" alt="" />{{ !dmTarget?.avatar_url ? (dmTarget?.display_name?.[0] || 'D') : '' }}</span><div><h2>{{ dmTarget?.display_name || 'Direct messages' }}</h2><small>{{ dmTarget ? dmTarget.username : 'Choose a friend to start chatting' }}</small></div><div v-if="dmTarget" class="dm-call-actions"><button type="button" title="Voice call" @click="startDmCall('audio')"><FontAwesomeIcon :icon="faPhoneSlash" /></button><button type="button" title="Video call" @click="startDmCall('video')"><FontAwesomeIcon :icon="faCamera" /></button><button type="button" title="Screen share" @click="startDmCall('screen')"><FontAwesomeIcon :icon="faDisplay" /></button></div></header><div class="dm-messages"><template v-if="dmTarget"><article v-for="message in dmMessages" :key="message.id"><img v-if="message.avatar_url" class="avatar image" :src="message.avatar_url" alt="" /><span v-else class="avatar">{{ message.author_name?.[0] }}</span><div><strong>{{ message.author_name }}</strong><p>{{ message.body }}</p><small>{{ new Date(message.created_at).toLocaleString() }}</small></div></article><p v-if="!dmMessages.length" class="empty">Start a conversation.</p></template><p v-else class="empty">Select a friend from the left.</p></div><form v-if="dmTarget" class="dm-composer" @submit.prevent="sendDm"><input v-model="dmDraft" :placeholder="`Message ${dmTarget.display_name || ''}`" maxlength="4000" /><button class="primary">Send</button></form></section></div>
+      <div v-if="homeTab === 'dm'" class="dm-page"><aside class="dm-sidebar"><input placeholder="Find or start a conversation" /><h3>Direct Messages</h3><button v-for="friend in openDmUsers" :key="friend.id" class="dm-contact" :class="{ active: dmTarget?.id === friend.id }" @click="openDm(friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><strong>{{ friend.display_name }} <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</small></button></aside><section class="dm-conversation"><header><span class="avatar"><img v-if="dmTarget?.avatar_url" :src="dmTarget.avatar_url" alt="" />{{ !dmTarget?.avatar_url ? (dmTarget?.display_name?.[0] || 'D') : '' }}</span><div><h2>{{ dmTarget?.display_name || 'Direct messages' }} <b v-if="dmTarget?.system" class="system-badge">SYSTEM</b></h2><small>{{ dmTarget ? dmTarget.username : 'Choose a friend to start chatting' }}</small></div><div v-if="dmTarget && !dmTarget.system" class="dm-call-actions"><button type="button" title="Voice call" @click="startDmCall('audio')"><FontAwesomeIcon :icon="faPhoneSlash" /></button><button type="button" title="Video call" @click="startDmCall('video')"><FontAwesomeIcon :icon="faCamera" /></button><button type="button" title="Screen share" @click="startDmCall('screen')"><FontAwesomeIcon :icon="faDisplay" /></button></div></header><div class="dm-messages"><template v-if="dmTarget"><article v-for="message in dmMessages" :key="message.id" :class="{ 'system-message': message.kind === 'system' }"><img v-if="message.avatar_url" class="avatar image" :src="message.avatar_url" alt="" /><span v-else class="avatar">{{ message.author_name?.[0] }}</span><div><strong>{{ message.author_name }} <b v-if="message.kind === 'system'" class="system-badge">SYSTEM</b></strong><p>{{ message.body }}</p><small>{{ new Date(message.created_at).toLocaleString() }}</small></div></article><p v-if="!dmMessages.length" class="empty">Start a conversation.</p></template><p v-else class="empty">Select a conversation from the left.</p></div><form v-if="dmTarget && !dmTarget.system" class="dm-composer" @submit.prevent="sendDm"><input v-model="dmDraft" :placeholder="`Message ${dmTarget.display_name || ''}`" maxlength="4000" /><button class="primary">Send</button></form><div v-else-if="dmTarget?.system" class="dm-system-notice">Official instance messages are read-only.</div></section></div>
       <div v-else-if="homeTab === 'friends'" class="home-feed friends-page"><span class="eyebrow">HOME · FRIENDS</span><h2>Friends</h2><form class="friend-add" @submit.prevent="addFriend"><input v-model="friendUsername" placeholder="Add by username" /><button class="primary">Add friend</button></form><section v-if="friendRequests.length"><h3>Requests</h3><article v-for="request in friendRequests" :key="request.id"><strong>{{ request.display_name }}</strong><button class="primary" @click="acceptFriend(request)">Accept</button></article></section><h3>Your friends</h3><article v-for="friend in friends" :key="friend.id" class="friend-row"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><div><strong>{{ friend.display_name }}</strong><small>{{ friend.username }}</small><p>{{ friend.status_text || 'Online' }}</p></div><button class="friend-message" title="Message" @click="openDm(friend)"><FontAwesomeIcon :icon="faComments" /></button><button @click="removeFriendEntry(friend)">Remove</button></article><p v-if="!friends.length" class="empty">No friends yet.</p></div>
       <div v-else-if="homeTab === 'feed'" class="home-feed">
         <form class="status-composer" @submit.prevent="publishStatus">
@@ -3496,7 +3985,9 @@ watch(
             </header>
             <p>{{ post.body }}</p>
             <footer>
-              <button>Reply</button><button>Boost</button><button>React</button>
+              <button disabled title="Pulse replies are not available yet">Reply</button
+              ><button disabled title="Pulse boosts are not available yet">Boost</button
+              ><button disabled title="Pulse reactions are not available yet">React</button>
             </footer>
           </div>
         </article>
@@ -3595,8 +4086,9 @@ watch(
       </div>
     </section>
     <aside v-if="page === 'chat'" class="member-list">
-      <span class="label">MEMBERS — {{ guildMembers.length }}</span
-      ><template v-for="(member, memberIndex) in guildMembers" :key="member.id"><div v-if="isFirstRoleMember(member, memberIndex)" class="member-role-heading">{{ primaryMemberRole(member)?.name || 'Online' }} — {{ guildMembers.filter((item) => (primaryMemberRole(item)?.id || '__online') === (primaryMemberRole(member)?.id || '__online')).length }}</div><button
+      <div class="member-list-heading"><strong>Members — {{ guildMembers.length }}</strong><button type="button" title="Close member list" aria-label="Close member list" @click="membersPanelOpen = false">×</button></div>
+      <label class="member-search"><span class="sr-only">Search members</span><input v-model="memberSearch" placeholder="Search members" /></label>
+      <template v-for="(member, memberIndex) in displayedGuildMembers" :key="member.id"><div v-if="isFirstRoleMember(member, memberIndex, displayedGuildMembers)" class="member-role-heading">{{ primaryMemberRole(member)?.name || 'Online' }} — {{ displayedGuildMembers.filter((item) => (primaryMemberRole(item)?.id || '__online') === (primaryMemberRole(member)?.id || '__online')).length }}</div><button
         class="themed-member"
         :class="{ 'has-member-theme': member.banner_url }"
         :style="{
@@ -3629,7 +4121,7 @@ watch(
           >
         </span>
         <div>
-          <strong :style="usernameThemeStyle(member)">{{ member.nickname || member.display_name }}</strong>
+          <strong :style="usernameThemeStyle(member)">{{ member.nickname || member.display_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
           <span v-if="member.roles?.length" class="member-role-chips"><i v-for="role in member.roles" :key="role.id" :style="{ color: role.color }">{{ role.name }}</i></span>
           <small>{{
             member.status_text || `${member.username}@${user.home_server}`
@@ -3703,7 +4195,7 @@ watch(
       <button @click="openProfile(userMenu.id, 'full')">
         Edit Per-server Profile
       </button>
-      <button>Apps <span>›</span></button>
+      <button disabled title="App integrations are not available yet">Apps <span>›</span></button>
       <button
         @click="
           openGuildSettings('roles');
@@ -3714,6 +4206,7 @@ watch(
       </button>
       <div v-if="guildRoles.length" class="context-role-list"><small>Assign role</small><button v-for="role in guildRoles.filter((item) => !item.managed)" :key="`assign-${role.id}`" @click="toggleMemberRole(role)"><i :style="{ background: role.color }"></i>{{ role.name }}</button></div>
       <div class="context-separator"></div>
+      <button v-if="userMenu.id !== user.id" @click="reportUserFromMenu">Report user</button>
       <button
         @click="
           openGuildSettings('members');
@@ -3988,11 +4481,12 @@ watch(
     </div>
     <div
       v-if="guildSettingsDialog"
-      class="settings-overlay guild-settings-overlay"
+      class="settings-overlay guild-settings-overlay instance-style-settings"
     >
       <aside class="settings-nav">
         <h3>{{ activeCommunity.name }}</h3>
-        <span class="settings-group">Community</span>
+        <p class="settings-nav-description">{{ activeCommunity.description || 'Community settings and administration' }}</p>
+        <span class="settings-group">Community settings</span>
         <button
           :class="{ selected: guildSettingsTab === 'overview' }"
           @click="guildSettingsTab = 'overview'"
@@ -4050,7 +4544,7 @@ watch(
           @click="guildSettingsTab = 'audit'"
         >
           Audit Log</button
-        ><button>Bans</button><span class="settings-group">Community</span
+        ><button disabled title="Community ban management is not available yet">Bans</button><span class="settings-group">Community</span
         ><button @click="guildSettingsTab = 'overview'">
           Community Overview</button
         ><button
@@ -4058,13 +4552,16 @@ watch(
           @click="guildSettingsTab = 'onboarding'"
         >
           Onboarding</button
-        ><button>Server Insights</button
-        ><button class="delete-server-nav">Delete Server</button>
+        ><button disabled title="Server insights are not available yet">Server Insights</button
+        ><button class="delete-server-nav" disabled title="Server deletion is not available yet">Delete Server</button>
+        <button class="settings-back-link" @click="guildSettingsDialog = false">← Back to chat</button>
       </aside>
       <section class="settings-content community-content">
         <button class="close-settings" @click="guildSettingsDialog = false">
           ×
         </button>
+        <header class="settings-workspace-header"><span class="eyebrow">COMMUNITY SETTINGS</span><h2>{{ communitySettingsPage[0] }}</h2><p>{{ communitySettingsPage[1] }}</p></header>
+        <div class="settings-workspace-body">
         <div v-if="error" class="error">{{ error }}</div>
         <div v-if="saved" class="success">{{ saved }}</div>
         <template v-if="guildSettingsTab === 'overview'">
@@ -4082,6 +4579,11 @@ watch(
               <label
                 >Name<input v-model="guildForm.name" maxlength="80"
               /></label>
+              <div class="community-tag-fields">
+                <label>Member tag<input v-model="guildForm.profile.memberTag" maxlength="12" placeholder="AURORA" /></label>
+                <label>Tag emoji<input v-model="guildForm.profile.memberTagEmoji" maxlength="16" placeholder="🌌" /></label>
+              </div>
+              <p class="upload-help">This community badge appears beside member usernames throughout LibraCord.</p>
               <div class="profile-divider">
                 <h3>Icon</h3>
                 <p>We recommend a square image of at least 512×512.</p>
@@ -4637,6 +5139,7 @@ watch(
           ><h2>Community Settings</h2>
           <p>Select a settings page from the sidebar.</p></template
         >
+        </div>
       </section>
     </div>
     <div
@@ -4699,12 +5202,12 @@ watch(
               "Living my best federated life!"
             }}
           </div>
-          <h3>{{ activeProfile.display_name }}</h3>
-          <div class="profile-handle">{{ activeProfile.handle }}</div>
+          <h3>{{ activeProfile.display_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></h3>
+          <div class="profile-handle">{{ activeProfile.handle }}<template v-if="activeProfile.pronouns"> · {{ activeProfile.pronouns }}</template></div>
           <div class="profile-sparkles">🦈 💠 🦄 💎 #️⃣ 🎁</div>
           <div v-if="activeProfileMode !== 'self'" class="profile-actions">
-            <button @click="mentionUser">💬 Message</button>
-            <button>🎁</button><button>•••</button>
+            <button @click="openDm({ id: activeProfile.id, display_name: activeProfile.display_name, username: activeProfile.username, avatar_url: activeProfile.avatar_url, banner_url: activeProfile.banner_url, status_text: activeProfile.status_text }); activeProfile = null">💬 Message</button>
+            <button disabled title="Gifts are not available yet">🎁</button><button disabled title="More profile actions are not available yet">•••</button>
           </div>
           <div class="profile-section profile-about">
             <strong>About me</strong>
@@ -4734,8 +5237,8 @@ watch(
                 >{{ activeProfile.status || "online" }}</span
               ><b>›</b>
             </button>
-            <button><span>🎞 Clips</span><b>›</b></button>
-            <button><span>● Switch Accounts</span><b>›</b></button>
+            <button disabled title="Clips are not available yet"><span>🎞 Clips</span><b>›</b></button>
+            <button disabled title="Account switching is not available yet"><span>● Switch Accounts</span><b>›</b></button>
             <button @click="copyOwnProfileId">
               <span>▣ Copy User ID</span>
             </button>
@@ -4768,7 +5271,7 @@ watch(
               >
                 <i :style="{ background: role.color }"></i>{{ role.name }}
               </span>
-              <button>＋</button>
+              <button disabled title="Assign roles from the member context menu">＋</button>
             </div>
           </div>
           <button
@@ -4816,15 +5319,21 @@ watch(
         </div>
       </form>
     </div>
-    <div v-if="settingsOpen" class="settings-overlay">
+    <div v-if="settingsOpen" class="settings-overlay user-settings-overlay instance-style-settings">
       <aside class="settings-nav">
-        <h3>User Settings</h3>
+        <h3>{{ activeCommunity?.name || 'LibraCord' }}</h3>
+        <p class="settings-nav-description">{{ activeCommunity?.description || 'Your LibraCord account' }}</p>
+        <span class="settings-group">User settings</span>
         <button
           :class="{ selected: settingsTab === 'profile' }"
           @click="settingsTab = 'profile'"
         >
           My Profile</button
         ><button
+          :class="{ selected: settingsTab === 'password' }"
+          @click="settingsTab = 'password'"
+        >Password</button>
+        <span class="settings-group">App settings</span><button
           :class="{ selected: settingsTab === 'audio' }"
           @click="settingsTab = 'audio'"
         >
@@ -4835,21 +5344,32 @@ watch(
         >
           Appearance</button
         ><button
+          :class="{ selected: settingsTab === 'accessibility' }"
+          @click="settingsTab = 'accessibility'"
+        >Accessibility</button
+        ><button
           :class="{ selected: settingsTab === 'notifications' }"
           @click="settingsTab = 'notifications'"
         >
-          Notifications</button
+          Notifications</button>
+        <span class="settings-group">Privacy &amp; locale</span><button
+          :class="{ selected: settingsTab === 'privacy' }"
+          @click="settingsTab = 'privacy'"
+        >Privacy &amp; Safety</button
         ><button
-          :class="{ selected: settingsTab === 'password' }"
-          @click="settingsTab = 'password'"
-        >
-          Password</button
-        ><button
+          :class="{ selected: settingsTab === 'language' }"
+          @click="settingsTab = 'language'"
+        >Language</button>
+        <span v-if="isDesktopApp" class="settings-group">Desktop</span><button
           v-if="isDesktopApp"
           :class="{ selected: settingsTab === 'desktop' }"
           @click="settingsTab = 'desktop'"
         >
-          Desktop app</button
+          Desktop app</button>
+        <span class="settings-group">Advanced</span><button
+          :class="{ selected: settingsTab === 'advanced' }"
+          @click="settingsTab = 'advanced'"
+        >Advanced</button
         ><template v-if="isAdmin"
           ><span class="settings-group">Administration</span
           ><button
@@ -4858,7 +5378,7 @@ watch(
           >
             <FontAwesomeIcon :icon="faSliders" /> Instance administration
           </button></template
-        ><button class="logout-link" @click="logout">Log Out</button>
+        ><button class="settings-back-link" @click="settingsOpen = false">← Back to chat</button><button class="logout-link" @click="logout">Log Out</button>
       </aside>
       <section class="settings-content">
         <button
@@ -4868,6 +5388,8 @@ watch(
         >
           ×
         </button>
+        <header class="settings-workspace-header"><span class="eyebrow">USER SETTINGS</span><h2>{{ userSettingsPage[0] }}</h2><p>{{ userSettingsPage[1] }}</p></header>
+        <div class="settings-workspace-body">
         <div v-if="error" class="error">{{ error }}</div>
         <div v-if="saved" class="success">{{ saved }}</div>
         <template v-if="settingsTab === 'profile'">
@@ -5044,7 +5566,7 @@ watch(
                       profileDecoration().payload.icon || "✦"
                     }}</b></span
                   >
-                  <h3>{{ profileName || "Display name" }}</h3>
+                  <h3>{{ profileName || "Display name" }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></h3>
                   <div class="profile-handle">
                     {{ profileUsername || "username" }}@{{ user.home_server }}
                   </div>
@@ -5095,6 +5617,8 @@ watch(
               <option value="">System default</option>
               <option v-for="device in videoDevices" :key="device.deviceId" :value="device.deviceId">{{ device.label || "Camera" }}</option>
             </select></label>
+          <label>Webcam quality<select v-model="settings.cameraQuality"><option>720p</option><option>1080p</option><option>1440p</option><option>4K</option></select></label>
+          <label>Webcam frame rate<select v-model.number="settings.cameraFps"><option :value="30">30 FPS</option><option :value="60">60 FPS</option><option :value="120">120 FPS</option><option :value="144">144 FPS</option><option :value="145">145 FPS</option></select></label>
           <div class="camera-test"><video v-if="cameraTestStream" ref="cameraPreview" autoplay playsinline muted></video><p v-else>Test your webcam before joining a call.</p><button type="button" @click="cameraTestStream ? stopCameraTest() : testCamera()">{{ cameraTestStream ? "Stop camera test" : "Test webcam" }}</button></div>
           ><button class="primary" @click="saveSettings">
             Save audio settings
@@ -5103,16 +5627,27 @@ watch(
           ><h2>Appearance</h2>
           <label
             >Theme<select v-model="settings.theme">
+              <option value="system">System</option>
               <option value="dark">Dark</option>
               <option value="midnight">Midnight</option>
               <option value="light">Light</option>
             </select></label
+          ><label>Accent colour<input v-model="settings.accentColor" type="color" /></label
+          ><label>Interface density<select v-model="settings.density"><option value="compact">Compact</option><option value="default">Default</option><option value="spacious">Spacious</option></select></label
+          ><label>Message spacing<select v-model="settings.messageSpacing"><option value="compact">Compact</option><option value="comfortable">Comfortable</option><option value="spacious">Spacious</option></select></label
           ><label class="toggle"
             ><input v-model="settings.compact" type="checkbox" /> Compact
             message spacing</label
           ><button class="primary" @click="saveSettings">
             Save appearance
           </button></template
+        ><template v-else-if="settingsTab === 'accessibility'"
+          ><h2>Accessibility</h2>
+          <label>Text size <output>{{ settings.textSize }}%</output><input v-model.number="settings.textSize" type="range" min="85" max="130" step="5" /></label>
+          <label class="toggle"><input v-model="settings.reducedMotion" type="checkbox" /> Reduce motion</label>
+          <label class="toggle"><input v-model="settings.increasedContrast" type="checkbox" /> Increase contrast</label>
+          <label class="toggle"><input v-model="settings.reducedTransparency" type="checkbox" /> Reduce transparency</label>
+          <button class="primary" @click="saveSettings">Save accessibility</button></template
         ><template v-else-if="settingsTab === 'notifications'"
           ><h2>Notifications</h2>
           <label class="toggle"
@@ -5121,6 +5656,15 @@ watch(
           ><button class="primary" @click="saveSettings">
             Save notifications
           </button></template
+        ><template v-else-if="settingsTab === 'privacy'"
+          ><h2>Privacy &amp; Safety</h2>
+          <label class="toggle"><input v-model="settings.showMessagePreviews" type="checkbox" /> Show message previews in notifications</label>
+          <p class="settings-help">Direct-message encryption and community moderation policies continue to use LibraCord's existing security controls.</p>
+          <button class="primary" @click="saveSettings">Save privacy settings</button></template
+        ><template v-else-if="settingsTab === 'language'"
+          ><h2>Language</h2>
+          <label>Display language<select v-model="settings.language"><option value="en-GB">English (UK)</option><option value="en-US">English (US)</option></select></label>
+          <button class="primary" @click="saveSettings">Save language</button></template
         ><template v-else-if="settingsTab === 'desktop'"
           ><h2>Desktop app</h2>
           <p class="settings-help">Configure how LibraCord behaves in the installed app.</p>
@@ -5130,6 +5674,11 @@ watch(
           <label v-if="isDesktopApp" class="toggle"><input v-model="settings.hardwareAcceleration" type="checkbox" /> Use hardware acceleration for video</label>
           <p v-if="isDesktopApp" class="settings-help">Restart the desktop app after changing this setting.</p>
           <button class="primary" @click="saveSettings">Save desktop settings</button></template
+        ><template v-else-if="settingsTab === 'advanced'"
+          ><h2>Advanced</h2>
+          <p class="settings-help">These controls affect rendering throughout the current device.</p>
+          <label v-if="isDesktopApp" class="toggle"><input v-model="settings.hardwareAcceleration" type="checkbox" /> Hardware-accelerated video</label>
+          <button class="primary" @click="saveSettings">Save advanced settings</button></template
         ><template v-else
           ><h2>Change Password</h2>
           <label
@@ -5147,9 +5696,14 @@ watch(
             Change password
           </button></template
         >
+        </div>
       </section>
     </div>
     <div v-if="incomingDmCall" class="dm-call-modal" @click.self="incomingDmCall = null"><div class="dm-call-card"><h3>Incoming {{ incomingDmCall.mode }} call</h3><p>{{ incomingDmCall.callerName }} is calling you.</p><button class="secondary" @click="socket.emit('dm:call-response', { recipientId: incomingDmCall.callerId, accepted: false, callId: incomingDmCall.callId }); incomingDmCall = null">Decline</button><button class="primary" @click="socket.emit('dm:call-response', { recipientId: incomingDmCall.callerId, accepted: true, callId: incomingDmCall.callId }); openDm({ id: incomingDmCall.callerId, display_name: incomingDmCall.callerName }); incomingDmCall = null">Accept</button></div></div>
+    <div v-if="imageLightbox" class="image-lightbox" role="dialog" aria-modal="true" :aria-label="imageLightbox.name" @click.self="closeImageLightbox">
+      <header><strong>{{ imageLightbox.name }}</strong><div><a :href="imageLightbox.source" target="_blank" rel="noopener" download>Download</a><button type="button" title="Close image" @click="closeImageLightbox">×</button></div></header>
+      <button type="button" class="image-lightbox-stage" title="Close image" @click="closeImageLightbox"><img :src="imageLightbox.source" :alt="imageLightbox.name" /></button>
+    </div>
     <div v-if="dmCallRoom" class="dm-call-stage"><div class="dm-call-card"><span class="eyebrow">PRIVATE CALL</span><h3>{{ dmTarget?.display_name }}</h3><p>Connected securely via LiveKit</p><div class="voice-bottom-toolbar"><button @click="toggleDmMute"><FontAwesomeIcon :icon="dmCallMuted ? faMicrophoneSlash : faMicrophone" /></button><button @click="leaveDmCall" class="hangup"><FontAwesomeIcon :icon="faPhoneSlash" /></button></div></div></div>
     <div id="remote-audio"></div>
     <div v-if="cropper" class="image-crop-modal" @click.self="closeImageCrop">

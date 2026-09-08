@@ -5,10 +5,12 @@ const dotenv = require("dotenv");
 
 const root = path.resolve(__dirname, "..");
 const config = dotenv.config({ path: path.join(root, ".env.screenshots.local"), quiet: true }).parsed || {};
-const targetUrl = config.SCREENSHOT_URL;
-const username = config.SCREENSHOT_USERNAME;
-const password = config.SCREENSHOT_PASSWORD;
-const outputDirectory = path.join(root, "docs", "assets", "screenshots");
+const targetUrl = process.env.SCREENSHOT_URL || config.SCREENSHOT_URL;
+const username = process.env.SCREENSHOT_USERNAME || config.SCREENSHOT_USERNAME;
+const password = process.env.SCREENSHOT_PASSWORD || config.SCREENSHOT_PASSWORD;
+const outputDirectory = process.env.SCREENSHOT_OUTPUT_DIR
+  ? path.resolve(process.env.SCREENSHOT_OUTPUT_DIR)
+  : path.join(root, "docs", "assets", "screenshots");
 
 if (!targetUrl || !username || !password) {
   console.error("Configure SCREENSHOT_URL, SCREENSHOT_USERNAME, and SCREENSHOT_PASSWORD in .env.screenshots.local.");
@@ -109,6 +111,11 @@ async function main() {
     })()`);
     if (!submitted && !(await clickMatching(window, "sign in|log in|login|continue"))) throw new Error("Could not submit the login form.");
     await wait(3500);
+  }
+
+  if (await clickSelector(window, 'button[title="User settings"]')) {
+    await capture(window, "05-profile-customization.png");
+    await clickMatching(window, "Back to chat");
   }
 
   await clickMatching(window, "^LibraCord Home$");

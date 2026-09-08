@@ -29,6 +29,11 @@ The API returns errors as `{ "error": "message" }`. Typical status codes are `40
 | `PATCH` | `/api/v1/admin/instance` | Admin | Update registration, branding, federation, retention, rules, and limits |
 | `GET` | `/api/v1/admin/users` | Admin | List local users |
 | `PATCH` | `/api/v1/admin/users/:id` | Admin | Change role/suspension subject to owner protections |
+| `GET` | `/api/v1/admin/moderation` | Admin | Active bans, reports, audit history, and system identity |
+| `POST|DELETE` | `/api/v1/admin/moderation/users/:id/ban` | Admin | Ban/unban an account and revoke active sessions |
+| `POST` | `/api/v1/admin/moderation/users/:id/message` | Admin | Send a read-only DM from the instance system identity |
+| `PATCH` | `/api/v1/admin/moderation/reports/:id` | Admin | Review, action, or dismiss a report |
+| `POST` | `/api/v1/reports` | User | Report a user, message, community, or peer |
 
 ## Home, publishing, and emoji
 
@@ -110,11 +115,14 @@ Message content is limited to 4,000 characters, a message can reference up to ei
 | `POST` | `/api/v1/friends/request` | Send a request using `{ "username": "user@host" }` |
 | `POST` | `/api/v1/friends/:id/accept` | Accept a request |
 | `DELETE` | `/api/v1/friends/:id` | Remove a friend |
+| `GET` | `/api/v1/dms` | List persisted DM conversations, including system messages |
 | `GET|POST` | `/api/v1/dms/:userId` | List/send stored DM payloads |
 | `GET` | `/api/v1/crypto/key/:userId` | Fetch a user's experimental DM public key |
 | `PUT` | `/api/v1/crypto/key` | Publish the current user's public key |
 
 Local `user@localhost:port` lookup is supported. Cross-instance DMs use the signed ciphertext endpoints below; see [Security](security.md) for encryption limitations.
+
+Instance system messages are intentionally one-way and are stored as `kind: "system"`. Their public sender is the reserved instance system identity; the administrator who initiated one is recorded only in the private moderation audit log.
 
 ## Federation protocol
 
@@ -160,4 +168,4 @@ Only explicitly allowed peers participate in aggregation. See [Federation](feder
 
 ## Compatibility routes
 
-`GET /api/communities` and `GET /api/channels/:id/messages` remain for the current client/older integrations. New work should use `/api/v1` where available. Socket.IO events are documented separately in [Realtime events](realtime.md).
+The current client uses the versioned API exclusively. `GET /api/communities` and `GET /api/channels/:id/messages` remain temporarily for older integrations and return `Deprecation: true` plus a `Link` header naming their successor. New integrations must use `/api/v1/guilds` and `/api/v1/channels/:id/messages`. Socket.IO events are documented separately in [Realtime events](realtime.md).

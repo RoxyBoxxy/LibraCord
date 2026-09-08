@@ -8,10 +8,11 @@ import { Server } from "socket.io";
 import { createApp } from "./app.js";
 import {
   channelExists, createDirectMessage, createMessage, findChannel,
-  listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
+  getSystemUser, listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
 } from "./db.js";
 import { getUser } from "./auth.js";
 import { deliverFederationOutbox, federationDomain, federationEvents, publishCommunitySnapshot } from "./federation.js";
+import { moderationEvents } from "./moderation-events.js";
 
 const port = Number(process.env.PORT || 3002);
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
@@ -62,6 +63,7 @@ io.use((socket, next) => {
 
 io.on("connection", (socket) => {
   socket.join(`user:${socket.user.id}`);
+  if (["owner", "admin"].includes(socket.user.role)) socket.join("instance-moderators");
   refreshNotificationRooms(socket);
 
   socket.on("profile:updated", () => io.emit("profile:updated", { userId: socket.user.id }));
@@ -85,6 +87,22 @@ io.on("connection", (socket) => {
     if (channel?.kind === "voice" && userCanConnectToChannel(channel.id, socket.user.id))
       io.emit("voice:presence-changed", channel.community_id);
   });
+  socket.on("voice-chat:join", (id) => {
+    const channelId = String(id || "");
+    if (channelExists(channelId, "voice") && userCanConnectToChannel(channelId, socket.user.id))
+      socket.join(`voice-chat:${channelId}`);
+  });
+  socket.on("voice-chat:leave", (id) => socket.leave(`voice-chat:${String(id || "")}`));
+  socket.on("voice:message:create", (input, ack = () => {}) => {
+    const channelId = String(input?.channelId || "");
+    const body = String(input?.body || "").trim().slice(0, 4000);
+    const attachments = Array.isArray(input?.attachments) ? input.attachments.slice(0, 8) : [];
+    if (!channelExists(channelId, "voice") || !userCanConnectToChannel(channelId, socket.user.id) || (!body && !attachments.length))
+      return ack({ ok: false, error: "Invalid voice channel message" });
+    const message = createMessage({ channelId, authorId: socket.user.id, authorName: socket.user.display_name, body, attachments });
+    io.to(`voice-chat:${channelId}`).emit("voice:message:created", message);
+    ack({ ok: true, message });
+  });
   socket.on("message:create", (input, ack = () => {}) => {
     const channelId = String(input?.channelId || "");
     const body = String(input?.body || "").trim().slice(0, 4000);
@@ -107,7 +125,7 @@ io.on("connection", (socket) => {
   socket.on("dm:send", (input, ack = () => {}) => {
     const recipientId = String(input?.recipientId || "");
     const body = String(input?.body || "").trim().slice(0, 12000);
-    if (!recipientId || !body || recipientId === socket.user.id)
+    if (!recipientId || !body || recipientId === socket.user.id || recipientId === getSystemUser().id)
       return ack({ ok: false, error: "Invalid direct message" });
     try {
       const saved = createDirectMessage(socket.user.id, recipientId, body);
@@ -159,6 +177,16 @@ federationEvents.on("community:deleted", ({ communityGlobalId }) =>
   io.emit("federation:community-deleted", { communityGlobalId }));
 federationEvents.on("remote-community:changed", ({ communityGlobalId }) =>
   io.emit("federation:community-changed", { communityGlobalId }));
+moderationEvents.on("system-message", ({ recipientId, message }) => {
+  io.to(`user:${recipientId}`).emit("dm:created", message);
+});
+moderationEvents.on("report:created", ({ reportId }) => {
+  io.to("instance-moderators").emit("moderation:report-created", { reportId });
+});
+moderationEvents.on("account:banned", ({ userId, reason }) => {
+  io.to(`user:${userId}`).emit("account:banned", { reason });
+  setTimeout(() => io.in(`user:${userId}`).disconnectSockets(true), 150);
+});
 
 const federationRetryTimer = setInterval(() => {
   void deliverFederationOutbox().catch((error) => console.error("Federation delivery failed", error.message));
