@@ -54,6 +54,8 @@ function createWindow() {
     titleBarStyle: 'hidden',
     webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'preload.cjs') },
   });
+  win.webContents.on('did-navigate', (_event, url) => console.log(`[LibraCord desktop] loaded ${url}`));
+  win.webContents.on('did-fail-load', (_event, code, description, url) => console.error(`[LibraCord desktop] failed ${url}: ${code} ${description}`));
   win.loadFile(path.join(__dirname, 'server-picker.html'));
 }
 ipcMain.on('window:minimize', (event) => BrowserWindow.fromWebContents(event.sender)?.minimize());
@@ -88,6 +90,7 @@ ipcMain.handle('desktop:set-display-source', (_event, sourceId) => {
   return true;
 });
 app.whenReady().then(async () => {
+  console.log(`[LibraCord desktop] UI ${desktopClientOrigin || '(selected home server)'} · home ${defaultHomeServer}`);
   // Preserve cookies, localStorage and desktop preferences while removing the
   // caches capable of serving an old frontend.
   await Promise.allSettled([

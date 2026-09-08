@@ -39,7 +39,15 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   serverOrigin = configuredServer ? configuredServer.replace(/\/$/, "") : "",
   isDesktopApp = Boolean(window.libracordDesktop),
   socket = io(serverOrigin || undefined, { autoConnect: false, forceNew: true, transports: ["websocket"], reconnection: true, reconnectionAttempts: Infinity }),
-  apiEndpoint = (path) => (serverOrigin ? `${serverOrigin}${path}` : path),
+  apiEndpoint = (value) => {
+    const path = String(value || "").trim();
+    if (!path) return "";
+    if (/^(https?:|data:|blob:)/i.test(path)) return path;
+    const normalized = /^[a-f0-9-]{36}$/i.test(path)
+      ? `/api/v1/assets/${path}`
+      : path.startsWith("/") ? path : `/${path}`;
+    return serverOrigin ? `${serverOrigin}${normalized}` : normalized;
+  },
   dmPrivateKey = ref(null),
   dmPublicKey = ref(null),
   user = ref(null),
@@ -1968,7 +1976,7 @@ function profileThemeStyle(profile) {
     "--profile-theme-bg": background,
     "--profile-theme-text": text,
     backgroundImage: theme.payload.imageUrl
-      ? `linear-gradient(#07111a66,#07111aaa),url(${theme.payload.imageUrl})`
+      ? `linear-gradient(#07111a66,#07111aaa),url(${apiEndpoint(theme.payload.imageUrl)})`
       : `linear-gradient(145deg,${background},color-mix(in srgb,${accent} 28%,${background}))`,
   };
 }
@@ -1978,7 +1986,7 @@ function profileDecoration(profile) {
   );
 }
 function profileBannerStyle(profile) {
-  if (profile?.banner_url) return { backgroundImage: `url(${profile.banner_url})` };
+  if (profile?.banner_url) return { backgroundImage: `url(${apiEndpoint(profile.banner_url)})` };
   const accent = profile?.accent_color || "#ff8fcf";
   return { background: `linear-gradient(135deg, ${accent}, #6f2a82 72%, #21152c)` };
 }
@@ -3077,7 +3085,7 @@ watch(
           :title="guild.name"
           @click="chooseGuild(guild)"
         >
-          <img v-if="guild.icon_url" :src="guild.icon_url" alt="" />
+          <img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" />
           <span v-else>{{ guild.name?.[0]?.toUpperCase() || 'L' }}</span>
           <i v-if="unreadCommunities[guild.id]"></i>
         </button>
@@ -3093,12 +3101,12 @@ watch(
       </button>
       <div class="community-picker">
         <button class="community-picker-trigger" @click="communityMenuOpen = !communityMenuOpen">
-          <span class="community-picker-icon"><img v-if="activeCommunity?.icon_url" :src="activeCommunity.icon_url" alt="" /><b v-else>{{ activeCommunity?.name?.[0]?.toUpperCase() || "L" }}</b></span>
+          <span class="community-picker-icon"><img v-if="activeCommunity?.icon_url" :src="apiEndpoint(activeCommunity.icon_url)" alt="" /><b v-else>{{ activeCommunity?.name?.[0]?.toUpperCase() || "L" }}</b></span>
           <strong>{{ activeCommunity?.name || "Choose community" }}</strong><b>⌄</b>
         </button>
         <div v-if="communityMenuOpen" class="community-menu">
           <button v-for="guild in communities" :key="guild.id" :class="{ active: activeCommunity?.id === guild.id, unread: unreadCommunities[guild.id], 'has-community-banner': guild.banner_url }" :style="guild.banner_url ? { '--community-menu-banner': `url(${guild.banner_url})` } : {}" @click="chooseGuild(guild)">
-            <span class="community-menu-icon"><img v-if="guild.icon_url" :src="guild.icon_url" alt="" /><b v-else>{{ guild.name[0].toUpperCase() }}</b></span><strong>{{ guild.name }}</strong><small>{{ guild.description || "Community" }}</small>
+            <span class="community-menu-icon"><img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" /><b v-else>{{ guild.name[0].toUpperCase() }}</b></span><strong>{{ guild.name }}</strong><small>{{ guild.description || "Community" }}</small>
             <i v-if="unreadCommunities[guild.id]" class="unread-badge">!</i>
           </button>
           <button class="community-create" @click="communityMenuOpen = false; guildDialog = true">
@@ -3149,7 +3157,7 @@ watch(
           <img
             v-if="user.avatar_url"
             class="avatar image"
-            :src="user.avatar_url"
+            :src="apiEndpoint(user.avatar_url)"
             alt=""
           />
           <span v-else class="avatar">{{ user.display_name[0] }}</span>
@@ -3159,7 +3167,7 @@ watch(
             :style="publishedPreviewStyle(profileDecoration())"
             ><img
               v-if="profileDecoration().payload.imageUrl"
-              :src="profileDecoration().payload.imageUrl"
+              :src="apiEndpoint(profileDecoration().payload.imageUrl)"
               alt=""
             /><b v-else>{{ profileDecoration().payload.icon || "✦" }}</b></span
           >
@@ -3211,7 +3219,7 @@ watch(
           <FontAwesomeIcon :icon="faGear" />
         </button>
         <div v-if="page === 'chat' && activeCommunity?.icon_url" class="community-sidebar-identity">
-          <img :src="activeCommunity.icon_url" alt="" />
+          <img :src="apiEndpoint(activeCommunity.icon_url)" alt="" />
         </div>
         <h1>
           {{
@@ -3223,7 +3231,7 @@ watch(
         <div
           v-if="page === 'chat' && activeCommunity?.banner_url"
           class="community-sidebar-banner"
-          :style="{ backgroundImage: `url(${activeCommunity.banner_url})` }"
+          :style="{ backgroundImage: `url(${apiEndpoint(activeCommunity.banner_url)})` }"
           aria-hidden="true"
         ></div>
         <p>
@@ -3257,7 +3265,7 @@ watch(
           </button>
           <div v-if="channel.kind === 'voice' && channelPresence(channel).length" class="voice-channel-members">
             <div v-for="participant in channelPresence(channel)" :key="`sidebar-${channel.id}-${participant.identity}`" class="voice-channel-member" :class="{ speaking: participant.speaking, 'has-banner': participant.banner }" :style="participant.banner ? { '--voice-sidebar-banner': `url(${participant.banner})` } : {}">
-              <span class="voice-sidebar-avatar"><img v-if="participant.avatar" :src="participant.avatar" alt="" /><b v-else>{{ participant.name?.[0]?.toUpperCase() || '?' }}</b><i></i></span>
+              <span class="voice-sidebar-avatar"><img v-if="participant.avatar" :src="apiEndpoint(participant.avatar)" alt="" /><b v-else>{{ participant.name?.[0]?.toUpperCase() || '?' }}</b><i></i></span>
               <strong>{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
               <span class="voice-sidebar-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i></span>
               <span class="voice-sidebar-media"><FontAwesomeIcon v-if="participant.camera" :icon="faCamera" title="Camera on" /><FontAwesomeIcon v-if="participant.screen" :icon="faDisplay" title="Sharing screen" /><FontAwesomeIcon v-if="participant.muted" :icon="faMicrophoneSlash" title="Muted" /></span>
@@ -3301,7 +3309,7 @@ watch(
         ><section class="home-navigation dm-open-list">
           <span class="label">DIRECT MESSAGES</span>
           <button v-for="friend in openDmUsers" :key="`open-dm-${friend.id}`" class="dm-nav-contact" :class="{ selected: dmTarget?.id === friend.id, 'has-dm-banner': friend.banner_url }" :style="friend.banner_url ? { '--dm-banner': `url(${friend.banner_url})` } : {}" @click="openDm(friend)">
-            <span class="dm-nav-avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}<i></i></span>
+            <span class="dm-nav-avatar"><img v-if="friend.avatar_url" :src="apiEndpoint(friend.avatar_url)" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}<i></i></span>
             <span><strong :style="usernameThemeStyle(friend)">{{ friend.display_name }} <span v-if="communityMemberTag.text && !friend.system" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span> <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>@{{ friend.username }}</small><em>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</em></span><i class="dm-online-dot"></i>
           </button>
           <p v-if="!openDmUsers.length" class="empty">No open conversations yet.</p>
@@ -3364,7 +3372,7 @@ watch(
           :title="participant.identity"
           @click="focusVoiceParticipant(participant)"
         >
-          <img v-if="participant.avatar" :src="participant.avatar" alt="" />
+          <img v-if="participant.avatar" :src="apiEndpoint(participant.avatar)" alt="" />
           <span v-else>{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
         </button>
       </div>
@@ -3391,7 +3399,7 @@ watch(
             <span class="message-reply-avatar">
               <img
                 v-if="messageAuthor(repliedMessage(message))?.avatar_url"
-                :src="messageAuthor(repliedMessage(message)).avatar_url"
+                :src="apiEndpoint(messageAuthor(repliedMessage(message)).avatar_url)"
                 alt=""
               />
               <b v-else>{{ repliedMessage(message).author_name?.[0] || '?' }}</b>
@@ -3406,7 +3414,7 @@ watch(
             <img
               v-if="messageAuthor(message)?.avatar_url"
               class="avatar image"
-              :src="messageAuthor(message).avatar_url"
+              :src="apiEndpoint(messageAuthor(message).avatar_url)"
               alt=""
             />
             <span v-else class="avatar">{{ message.author_name[0] }}</span>
@@ -3432,7 +3440,7 @@ watch(
                 <img
                   v-if="part.type === 'emoji'"
                   class="message-custom-emoji"
-                  :src="part.url"
+                  :src="apiEndpoint(part.url)"
                   :alt="`:${part.name}:`"
                   :title="`:${part.name}:`"
                 />
@@ -3457,7 +3465,7 @@ watch(
                 :title="`Remove ${reaction} reaction`"
                 @click="reactToMessage(message, reaction)"
               >
-                <img v-if="reactionCustomEmoji(reaction)" :src="reactionCustomEmoji(reaction).url" :alt="reaction" />
+                <img v-if="reactionCustomEmoji(reaction)" :src="apiEndpoint(reactionCustomEmoji(reaction).url)" :alt="reaction" />
                 <span v-else>{{ reaction }}</span>
                 <b>1</b>
               </button>
@@ -3490,8 +3498,8 @@ watch(
           :style="{ '--voice-color': participant.color }"
           @click="focusVoiceParticipant(participant)"
         >
-          <span v-if="participant.banner && !participant.isScreen" class="voice-profile-banner" :style="{ backgroundImage: `url(${participant.banner})` }"></span>
-          <img v-if="participant.avatar && !participant.isScreen" class="voice-profile-avatar" :src="participant.avatar" alt="" />
+          <span v-if="participant.banner && !participant.isScreen" class="voice-profile-banner" :style="{ backgroundImage: `url(${apiEndpoint(participant.banner)})` }"></span>
+          <img v-if="participant.avatar && !participant.isScreen" class="voice-profile-avatar" :src="apiEndpoint(participant.avatar)" alt="" />
           <span v-else class="voice-placeholder">{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
           <span v-if="participant.isScreen && !watchingScreens.includes(participant.participantSid)" class="screen-watch-control" @click.stop="watchScreen(participant)">▶ Watch screen</span>
           <span class="voice-name">{{ participant.isScreen ? `${participant.identity} · Screen` : `${participant.identity}${participant.local ? " (you)" : ""}` }}</span>
@@ -3503,14 +3511,14 @@ watch(
       </div>
       <div v-else-if="selected?.kind === 'voice'" class="voice-stage voice-lobby-stage">
         <div v-if="voiceConnecting" class="voice-participant-tile voice-connecting-tile" :style="{ '--voice-color': user?.accent_color || '#8b5cf6' }">
-          <img v-if="user?.avatar_url" :src="user.avatar_url" alt="" />
+          <img v-if="user?.avatar_url" :src="apiEndpoint(user.avatar_url)" alt="" />
           <span v-else class="voice-placeholder">{{ user?.display_name?.[0]?.toUpperCase() || '?' }}</span>
           <span class="voice-name">{{ user?.display_name || 'You' }} (you)</span>
           <span class="voice-connecting-state">{{ voiceStatus || 'Connecting…' }}</span>
         </div>
         <div v-else v-for="participant in channelPresence(selected)" :key="`lobby-${participant.identity}`" class="voice-participant-tile" :class="{ speaking: participant.speaking }" :style="{ '--voice-color': participant.color || '#8b5cf6' }">
-          <span v-if="participant.banner" class="voice-profile-banner" :style="{ backgroundImage: `url(${participant.banner})` }"></span>
-          <img v-if="participant.avatar" class="voice-profile-avatar" :src="participant.avatar" alt="" />
+          <span v-if="participant.banner" class="voice-profile-banner" :style="{ backgroundImage: `url(${apiEndpoint(participant.banner)})` }"></span>
+          <img v-if="participant.avatar" class="voice-profile-avatar" :src="apiEndpoint(participant.avatar)" alt="" />
           <span v-else class="voice-placeholder">{{ participant.name?.[0]?.toUpperCase() || '?' }}</span>
           <span class="voice-name">{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></span>
           <span class="voice-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i><i></i></span>
@@ -3582,7 +3590,7 @@ watch(
                 :title="`:${emoji.name}:`"
                 @click="chooseEmoji(`:${emoji.name}:`)"
               >
-                <img :src="emoji.url" :alt="emoji.name" />
+                <img :src="apiEndpoint(emoji.url)" :alt="emoji.name" />
               </button>
             </div>
           </section>
@@ -3604,7 +3612,7 @@ watch(
                 :title="`:${emoji.name}:`"
                 @click="chooseEmoji(`:${emoji.name}:`)"
               >
-                <img :src="emoji.url" :alt="emoji.name" />
+                <img :src="apiEndpoint(emoji.url)" :alt="emoji.name" />
               </button>
             </div>
           </section>
@@ -3640,7 +3648,7 @@ watch(
       <div v-if="selected?.kind === 'text' && Object.keys(typingUsers[selected.id] || {}).length" class="typing-indicator"><template v-if="Object.keys(typingUsers[selected.id]).length <= 3">{{ Object.values(typingUsers[selected.id]).join(', ') }} {{ Object.keys(typingUsers[selected.id]).length === 1 ? 'is' : 'are' }} typing</template><template v-else>Multiple people are typing</template></div>
       <form v-if="selected?.kind === 'text'" @submit.prevent="sendMessage">
         <button type="button" class="attachment-button" title="More message options" @click="composerMenuOpen = !composerMenuOpen">＋</button>
-        <div v-if="pendingAttachments.length" class="attachment-previews"><span v-for="attachment in pendingAttachments" :key="attachment.id"><img :src="attachment.url" :alt="attachment.name" /><button type="button" :class="{ active: contentWarning }" @click="contentWarning = contentWarning ? '' : 'Content warning'">{{ contentWarning ? 'Content warning' : 'Mark as content warning' }}</button></span></div>
+        <div v-if="pendingAttachments.length" class="attachment-previews"><span v-for="attachment in pendingAttachments" :key="attachment.id"><img :src="apiEndpoint(attachment.url)" :alt="attachment.name" /><button type="button" :class="{ active: contentWarning }" @click="contentWarning = contentWarning ? '' : 'Content warning'">{{ contentWarning ? 'Content warning' : 'Mark as content warning' }}</button></span></div>
         <input
           v-model="draft"
           :placeholder="`Message #${selected?.name || 'channel'}`"
@@ -3795,7 +3803,7 @@ watch(
             </div>
             <div class="emoji-admin-grid">
               <article v-for="emoji in customEmojis" :key="emoji.id">
-                <img :src="emoji.url" :alt="emoji.name" />
+                <img :src="apiEndpoint(emoji.url)" :alt="emoji.name" />
                 <span>:{{ emoji.name }}:</span>
                 <button
                   type="button"
@@ -3942,7 +3950,7 @@ watch(
           >
         </div>
       </header>
-      <div v-if="homeTab === 'dm'" class="dm-page"><aside class="dm-sidebar"><input placeholder="Find or start a conversation" /><h3>Direct Messages</h3><button v-for="friend in openDmUsers" :key="friend.id" class="dm-contact" :class="{ active: dmTarget?.id === friend.id }" @click="openDm(friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><strong>{{ friend.display_name }} <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</small></button></aside><section class="dm-conversation"><header><span class="avatar"><img v-if="dmTarget?.avatar_url" :src="dmTarget.avatar_url" alt="" />{{ !dmTarget?.avatar_url ? (dmTarget?.display_name?.[0] || 'D') : '' }}</span><div><h2>{{ dmTarget?.display_name || 'Direct messages' }} <b v-if="dmTarget?.system" class="system-badge">SYSTEM</b></h2><small>{{ dmTarget ? dmTarget.username : 'Choose a friend to start chatting' }}</small></div><div v-if="dmTarget && !dmTarget.system" class="dm-call-actions"><button type="button" title="Voice call" @click="startDmCall('audio')"><FontAwesomeIcon :icon="faPhoneSlash" /></button><button type="button" title="Video call" @click="startDmCall('video')"><FontAwesomeIcon :icon="faCamera" /></button><button type="button" title="Screen share" @click="startDmCall('screen')"><FontAwesomeIcon :icon="faDisplay" /></button></div></header><div class="dm-messages"><template v-if="dmTarget"><article v-for="message in dmMessages" :key="message.id" :class="{ 'system-message': message.kind === 'system' }"><img v-if="message.avatar_url" class="avatar image" :src="message.avatar_url" alt="" /><span v-else class="avatar">{{ message.author_name?.[0] }}</span><div><strong>{{ message.author_name }} <b v-if="message.kind === 'system'" class="system-badge">SYSTEM</b></strong><p>{{ message.body }}</p><small>{{ new Date(message.created_at).toLocaleString() }}</small></div></article><p v-if="!dmMessages.length" class="empty">Start a conversation.</p></template><p v-else class="empty">Select a conversation from the left.</p></div><form v-if="dmTarget && !dmTarget.system" class="dm-composer" @submit.prevent="sendDm"><input v-model="dmDraft" :placeholder="`Message ${dmTarget.display_name || ''}`" maxlength="4000" /><button class="primary">Send</button></form><div v-else-if="dmTarget?.system" class="dm-system-notice">Official instance messages are read-only.</div></section></div>
+      <div v-if="homeTab === 'dm'" class="dm-page"><aside class="dm-sidebar"><input placeholder="Find or start a conversation" /><h3>Direct Messages</h3><button v-for="friend in openDmUsers" :key="friend.id" class="dm-contact" :class="{ active: dmTarget?.id === friend.id }" @click="openDm(friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="apiEndpoint(friend.avatar_url)" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><strong>{{ friend.display_name }} <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</small></button></aside><section class="dm-conversation"><header><span class="avatar"><img v-if="dmTarget?.avatar_url" :src="apiEndpoint(dmTarget.avatar_url)" alt="" />{{ !dmTarget?.avatar_url ? (dmTarget?.display_name?.[0] || 'D') : '' }}</span><div><h2>{{ dmTarget?.display_name || 'Direct messages' }} <b v-if="dmTarget?.system" class="system-badge">SYSTEM</b></h2><small>{{ dmTarget ? dmTarget.username : 'Choose a friend to start chatting' }}</small></div><div v-if="dmTarget && !dmTarget.system" class="dm-call-actions"><button type="button" title="Voice call" @click="startDmCall('audio')"><FontAwesomeIcon :icon="faPhoneSlash" /></button><button type="button" title="Video call" @click="startDmCall('video')"><FontAwesomeIcon :icon="faCamera" /></button><button type="button" title="Screen share" @click="startDmCall('screen')"><FontAwesomeIcon :icon="faDisplay" /></button></div></header><div class="dm-messages"><template v-if="dmTarget"><article v-for="message in dmMessages" :key="message.id" :class="{ 'system-message': message.kind === 'system' }"><img v-if="message.avatar_url" class="avatar image" :src="apiEndpoint(message.avatar_url)" alt="" /><span v-else class="avatar">{{ message.author_name?.[0] }}</span><div><strong>{{ message.author_name }} <b v-if="message.kind === 'system'" class="system-badge">SYSTEM</b></strong><p>{{ message.body }}</p><small>{{ new Date(message.created_at).toLocaleString() }}</small></div></article><p v-if="!dmMessages.length" class="empty">Start a conversation.</p></template><p v-else class="empty">Select a conversation from the left.</p></div><form v-if="dmTarget && !dmTarget.system" class="dm-composer" @submit.prevent="sendDm"><input v-model="dmDraft" :placeholder="`Message ${dmTarget.display_name || ''}`" maxlength="4000" /><button class="primary">Send</button></form><div v-else-if="dmTarget?.system" class="dm-system-notice">Official instance messages are read-only.</div></section></div>
       <div v-else-if="homeTab === 'friends'" class="home-feed friends-page"><span class="eyebrow">HOME · FRIENDS</span><h2>Friends</h2><form class="friend-add" @submit.prevent="addFriend"><input v-model="friendUsername" placeholder="Add by username" /><button class="primary">Add friend</button></form><section v-if="friendRequests.length"><h3>Requests</h3><article v-for="request in friendRequests" :key="request.id"><strong>{{ request.display_name }}</strong><button class="primary" @click="acceptFriend(request)">Accept</button></article></section><h3>Your friends</h3><article v-for="friend in friends" :key="friend.id" class="friend-row"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><div><strong>{{ friend.display_name }}</strong><small>{{ friend.username }}</small><p>{{ friend.status_text || 'Online' }}</p></div><button class="friend-message" title="Message" @click="openDm(friend)"><FontAwesomeIcon :icon="faComments" /></button><button @click="removeFriendEntry(friend)">Remove</button></article><p v-if="!friends.length" class="empty">No friends yet.</p></div>
       <div v-else-if="homeTab === 'feed'" class="home-feed">
         <form class="status-composer" @submit.prevent="publishStatus">
@@ -3964,7 +3972,7 @@ watch(
             class="message-avatar"
             @click="!post.source?.peer_id && openProfile(post.author_id)"
           >
-            <img v-if="post.avatar_url" :src="post.avatar_url" alt="" /><span
+            <img v-if="post.avatar_url" :src="apiEndpoint(post.avatar_url)" alt="" /><span
               v-else
               class="avatar"
               >{{ post.display_name[0] }}</span
@@ -4101,7 +4109,7 @@ watch(
         @contextmenu.stop="showUserMenu($event, member)"
       >
         <span class="member-avatar-wrap">
-          <img v-if="member.avatar_url" :src="member.avatar_url" alt="" /><span
+          <img v-if="member.avatar_url" :src="apiEndpoint(member.avatar_url)" alt="" /><span
             v-else
             class="avatar"
             >{{ member.display_name[0] }}</span
@@ -4113,7 +4121,7 @@ watch(
             :style="publishedPreviewStyle(profileDecoration(member))"
             ><img
               v-if="profileDecoration(member).payload.imageUrl"
-              :src="profileDecoration(member).payload.imageUrl"
+              :src="apiEndpoint(profileDecoration(member).payload.imageUrl)"
               alt=""
             /><b v-else>{{
               profileDecoration(member).payload.icon || "✦"
@@ -5005,7 +5013,7 @@ watch(
           </div>
           <div class="emoji-admin-grid">
             <article v-for="emoji in guildEmojis" :key="emoji.id">
-              <img :src="emoji.url" :alt="emoji.name" /><span
+              <img :src="apiEndpoint(emoji.url)" :alt="emoji.name" /><span
                 >:{{ emoji.name }}:</span
               ><button class="danger" @click="removeGuildEmoji(emoji)">
                 Remove
@@ -5173,7 +5181,7 @@ watch(
           <img
             v-if="activeProfile.avatar_url"
             class="profile-card-avatar"
-            :src="activeProfile.avatar_url"
+            :src="apiEndpoint(activeProfile.avatar_url)"
             alt=""
           />
           <span v-else class="profile-card-avatar fallback">{{
@@ -5187,7 +5195,7 @@ watch(
           >
             <img
               v-if="profileDecoration(activeProfile).payload.imageUrl"
-              :src="profileDecoration(activeProfile).payload.imageUrl"
+              :src="apiEndpoint(profileDecoration(activeProfile).payload.imageUrl)"
               alt=""
             />
             <b v-else>{{
@@ -5499,7 +5507,7 @@ watch(
                   >
                     <img
                       v-if="item.payload.imageUrl"
-                      :src="item.payload.imageUrl"
+                      :src="apiEndpoint(item.payload.imageUrl)"
                       alt=""
                     /><span v-else>{{ item.payload.icon || "✦" }}</span
                     ><small>{{ item.name }}</small>
@@ -5547,7 +5555,7 @@ watch(
                   <img
                     v-if="profileAvatar"
                     class="profile-card-avatar"
-                    :src="profileAvatar"
+                    :src="apiEndpoint(profileAvatar)"
                     alt="Profile preview"
                   />
                   <span v-else class="profile-card-avatar fallback">{{
@@ -5560,7 +5568,7 @@ watch(
                     :style="publishedPreviewStyle(profileDecoration())"
                     ><img
                       v-if="profileDecoration().payload.imageUrl"
-                      :src="profileDecoration().payload.imageUrl"
+                      :src="apiEndpoint(profileDecoration().payload.imageUrl)"
                       alt=""
                     /><b v-else>{{
                       profileDecoration().payload.icon || "✦"
