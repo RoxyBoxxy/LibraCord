@@ -7,8 +7,8 @@ import { createServer } from "node:http";
 import { Server } from "socket.io";
 import { createApp } from "./app.js";
 import {
-  channelExists, createDirectMessage, createMessage, findChannel,
-  getSystemUser, listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
+  channelExists, createDirectMessage, createMessage, editMessage, deleteMessage, findMessage, findChannel,
+  getSystemUser, getInstanceSettings, listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
 } from "./db.js";
 import { getUser } from "./auth.js";
 import { deliverFederationOutbox, federationDomain, federationEvents, publishCommunitySnapshot } from "./federation.js";
@@ -17,6 +17,7 @@ import { moderationEvents } from "./moderation-events.js";
 const port = Number(process.env.PORT || 3002);
 // Voice media sessions are ephemeral; this process is the authoritative clock.
 const voiceMediaSessions = new Map();
+const messageReactions = new Map();
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const allowAnyClientOrigin = allowedOrigins.includes("*");
@@ -85,6 +86,17 @@ io.on("connection", (socket) => {
   socket.on("typing:stop", (id) => socket.to(`channel:${id}`).emit("typing:update", {
     channelId: id, userId: socket.user.id, typing: false,
   }));
+  socket.on("message:reaction", (input, ack = () => {}) => {
+    const channelId = String(input?.channelId || ""), messageId = String(input?.messageId || ""), emoji = String(input?.emoji || "").slice(0, 64);
+    if (!channelExists(channelId, "text") || !userCanAccessChannel(channelId, socket.user.id) || !messageId || !emoji) return ack({ ok: false, error: "Invalid reaction" });
+    const key = `${channelId}:${messageId}`;
+    const current = messageReactions.get(key) || [];
+    const next = current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji].slice(-50);
+    messageReactions.set(key, next);
+    io.to(`channel:${channelId}`).emit("message:reactions", { channelId, messageId, reactions: next });
+    ack({ ok: true, reactions: next });
+  });
+  socket.on("emoji:changed", ({ communityId } = {}) => io.emit("emoji:changed", { communityId: String(communityId || "") }));
   socket.on("voice:changed", (id) => {
     const channel = findChannel(String(id || ""));
     if (channel?.kind === "voice" && userCanConnectToChannel(channel.id, socket.user.id))
@@ -151,6 +163,19 @@ io.on("connection", (socket) => {
     const message = createMessage({ channelId, authorId: socket.user.id, authorName: socket.user.display_name, body, attachments, contentWarning, replyTo });
     io.to(`channel-notify:${channelId}`).emit("message:created", message);
     ack({ ok: true });
+  });
+  socket.on("message:edit", (input, ack = () => {}) => {
+    const messageId = Number(input?.messageId), body = String(input?.body || "").trim().slice(0, 4000);
+    if (!messageId || !body) return ack({ ok: false, error: "Invalid message" });
+    const message = editMessage(messageId, socket.user.id, body);
+    if (!message) return ack({ ok: false, error: "Message not found or not owned by you" });
+    const channel = findChannel(message.channel_id); if (channel) io.to(`channel-notify:${channel.id}`).emit("message:updated", { ...message, body }); ack({ ok: true, message: { ...message, body } });
+  });
+  socket.on("message:delete", (input, ack = () => {}) => {
+    const messageId = Number(input?.messageId); if (!messageId) return ack({ ok: false, error: "Invalid message" });
+    const message = findMessage(messageId);
+    if (!message || !deleteMessage(messageId, socket.user.id)) return ack({ ok: false, error: "Message not found or not owned by you" });
+    io.to(`channel-notify:${message.channel_id}`).emit("message:deleted", { messageId }); ack({ ok: true });
   });
   socket.on("community:changed", (payload) => {
     const communityId = String(payload?.communityId || "");
@@ -230,5 +255,16 @@ const federationRetryTimer = setInterval(() => {
 }, 10_000);
 federationRetryTimer.unref();
 void deliverFederationOutbox();
+
+const directoryEnabled = String(process.env.DIRECTORY_ENABLED || "false").toLowerCase() === "true";
+const directoryRegister = async () => {
+  if (!directoryEnabled || !process.env.DIRECTORY_URL) return;
+  try {
+    const settings = getInstanceSettings();
+    await fetch(new URL("/api/v1/instances/register", process.env.DIRECTORY_URL), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicUrl: process.env.PUBLIC_URL, name: settings.name, description: settings.shortDescription || settings.description, federationDomain: process.env.FEDERATION_DOMAIN, capabilities: ["federation", "realtime", "voice"] }), signal: AbortSignal.timeout(8000) });
+  } catch (error) { console.error("Directory heartbeat failed", error.message); }
+};
+const directoryTimer = setInterval(directoryRegister, 60_000); directoryTimer.unref();
+void directoryRegister();
 
 server.listen(port, () => console.log(`LibraCord API listening on http://localhost:${port}`));

@@ -1,7 +1,7 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, session } = require('electron');
 const path = require('node:path');
 const fs = require('node:fs');
-require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
+require('dotenv').config({ path: path.resolve(__dirname, '../.env'), override: true });
 const appPort = Number(process.env.PORT) || 3002;
 const localAppOrigin = `http://localhost:${appPort}`;
 let configuredPublicOrigin = '';
@@ -54,7 +54,17 @@ function createWindow() {
     titleBarStyle: 'hidden',
     webPreferences: { contextIsolation: true, sandbox: true, preload: path.join(__dirname, 'preload.cjs') },
   });
-  win.webContents.on('did-navigate', (_event, url) => console.log(`[LibraCord desktop] loaded ${url}`));
+  let cacheRefreshDone = false;
+  win.webContents.on('did-navigate', (_event, url) => {
+    console.log(`[LibraCord desktop] loaded ${url}`);
+    // A remote reverse proxy may serve a previously cached index even when
+    // the URL contains a cache-busting query. Force one renderer refresh after
+    // the selected web app has navigated, while avoiding a reload loop.
+    if (!cacheRefreshDone && /^https?:\/\//i.test(url) && !url.includes('/desktop/server-picker')) {
+      cacheRefreshDone = true;
+      setTimeout(() => win.webContents.reloadIgnoringCache(), 0);
+    }
+  });
   win.webContents.on('did-fail-load', (_event, code, description, url) => console.error(`[LibraCord desktop] failed ${url}: ${code} ${description}`));
   win.loadFile(path.join(__dirname, 'server-picker.html'));
 }

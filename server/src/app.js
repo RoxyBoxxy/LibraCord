@@ -64,7 +64,7 @@ import {
   createInstanceEmoji,
   deleteInstanceEmoji,
   listSocialPosts,
-  createSocialPost,
+  createSocialPost, boostSocialPost,
   listPublishedItems,
   createPublishedItem,
   listUserCollection,
@@ -188,6 +188,9 @@ const publicUser = (user) => ({
   banner_url: user.banner_url || "",
   bio: user.bio || "",
   accent_color: user.accent_color || "#7857ff",
+  server_tags: (() => { try { return (typeof user.settings === "string" ? JSON.parse(user.settings || "{}") : user.settings || {}).serverTags || {}; } catch { return {}; } })(),
+  server_tag: user.server_tag || "",
+  server_tag_emoji: user.server_tag_emoji || "",
   profile_css: user.profile_css || "",
   role: user.role,
   created_at: user.created_at,
@@ -212,12 +215,18 @@ const publicProfile = (user) => {
     banner_url: user.banner_url || "",
     bio: user.bio || "",
     accent_color: user.accent_color || "#7857ff",
+    server_tag: user.server_tag || "",
+    server_tag_emoji: user.server_tag_emoji || "",
     profile_css: user.profile_css || "",
     role: user.role,
     status: profileSettings.status || "online",
     status_text: profileSettings.statusText || "",
     decoration_id: profileSettings.selectedDecorationId || "",
     profile_theme_id: profileSettings.selectedProfileThemeId || "",
+    server_tags: profileSettings.serverTags || {},
+    server_tag_selection: profileSettings.serverTag || null,
+    profile_background: profileSettings.profileBackground || "#21152c",
+    profile_background_image: profileSettings.profileBackgroundImage || "",
     created_at: user.created_at,
   };
 };
@@ -425,6 +434,8 @@ export function createApp() {
       profileCss = String(req.body?.profileCss || "")
         .trim()
         .slice(0, 2000),
+      serverTag = String(req.body?.serverTag || "").trim().slice(0, 24),
+      serverTagEmoji = String(req.body?.serverTagEmoji || "").trim().slice(0, 8),
       input = req.body?.settings || {};
     if (!validUsername(username) || !displayName)
       return res.status(400).json({
@@ -480,6 +491,16 @@ export function createApp() {
       selectedUsernameStyleIds: Array.isArray(input.selectedUsernameStyleIds)
         ? input.selectedUsernameStyleIds.map(String).slice(0, 12)
         : [],
+      serverTags: input.serverTags && typeof input.serverTags === "object"
+        ? Object.fromEntries(Object.entries(input.serverTags).slice(0, 200).map(([id, value]) => [String(id), { text: String(value?.text || "").trim().slice(0, 24), emoji: String(value?.emoji || "").trim().slice(0, 8) }]))
+        : {},
+      serverTag: input.serverTag && typeof input.serverTag === "object"
+        ? { text: String(input.serverTag.text || "").trim().slice(0, 24), emoji: String(input.serverTag.emoji || "").trim().slice(0, 8) }
+        : null,
+      profileBackground: /^#[0-9a-f]{6}$/i.test(input.profileBackground) ? input.profileBackground : "#21152c",
+      profileBackgroundImage: String(input.profileBackgroundImage || "").slice(0, 2048),
+      profileBackgroundBlur: Math.max(0, Math.min(24, Number(input.profileBackgroundBlur) || 0)),
+      profileBackgroundDim: Math.max(0, Math.min(90, Number(input.profileBackgroundDim) || 0)),
     };
     res.json({
       user: publicUser(
@@ -491,6 +512,8 @@ export function createApp() {
           bio,
           accentColor,
           profileCss,
+          serverTag,
+          serverTagEmoji,
           settings,
         }),
       ),
@@ -652,7 +675,16 @@ export function createApp() {
       .slice(0, 1000);
     if (!body) return res.status(400).json({ error: "Status cannot be empty" });
     return res.status(201).json({
-      post: createSocialPost({ id: randomUUID(), userId: req.user.id, body }),
+      post: createSocialPost({ id: randomUUID(), userId: req.user.id, body, attachments: Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, 8) : [], replyTo: req.body?.replyTo || null }),
+    });
+  });
+  app.post("/api/v1/home/posts/:id/boost", requireUser, (req, res) => boostSocialPost(req.params.id) ? res.json({ ok: true }) : res.status(404).json({ error: "Post not found" }));
+  app.post("/api/v1/home/posts/:id/attachments", requireUser, (req, res) => {
+    messageFileUpload.single("file")(req, res, (error) => {
+      if (error) return res.status(400).json({ error: error.message });
+      if (!req.file) return res.status(400).json({ error: "Choose an image or file" });
+      const asset = storeAsset(uploadsDirectory, { buffer: req.file.buffer, mimeType: req.file.mimetype, kind: "pulse-attachment", ownerUserId: req.user.id });
+      return res.status(201).json({ attachment: { id: asset.id, url: `/api/v1/assets/${asset.id}`, name: req.file.originalname, mimeType: req.file.mimetype } });
     });
   });
   app.get("/api/v1/home/published", requireUser, (req, res) => {
@@ -1247,6 +1279,7 @@ export function createApp() {
       ? res.json({ members: listGuildMembers(req.params.id).map((member) => ({ ...member, roles: member.remote ? member.roles : listUserGuildRoles(req.params.id, member.id) })) })
       : res.status(403).json({ error: "Join this community first" }),
   );
+  app.delete("/api/v1/guilds/:id/members/@me", requireUser, (req, res) => removeGuildMember(req.params.id, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Membership not found" }));
   app.get("/api/v1/guilds/:id/roles", requireUser, (req, res) =>
     isGuildMember(req.params.id, req.user.id)
       ? res.json({ roles: listGuildRoles(req.params.id) })

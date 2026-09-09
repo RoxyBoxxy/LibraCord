@@ -70,9 +70,15 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   homeTab = ref("feed"),
   homePosts = ref([]),
   homePostDraft = ref(""),
+  homePostAttachments = ref([]),
+  pulseReplyTo = ref(null),
   publishedItems = ref([]),
   friends = ref([]),
   friendRequests = ref([]),
+  friendGroups = ref([]),
+  activeFriendGroup = ref("all"),
+  customDialog = ref(null),
+  friendRefreshTimer = ref(null),
   friendUsername = ref(""),
   dmTarget = ref(null),
   openDmUsers = ref([]),
@@ -86,8 +92,10 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   typingUsers = ref({}),
   typingTimer = ref(null),
   messageRefreshTimer = ref(null),
+  messageListElement = ref(null),
   collectionIds = ref([]),
   discoverCommunities = ref([]),
+  discoverTrait = ref(""),
   invitePreview = ref(null),
   homeSources = ref([]),
   unavailableHomeSources = ref(0),
@@ -240,6 +248,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
     reducedTransparency: false,
     showMessagePreviews: true,
     language: "en-GB",
+    serverTags: {},
   }),
   profileName = ref(""),
   profileUsername = ref(""),
@@ -247,7 +256,13 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   profileBanner = ref(""),
   profileBio = ref(""),
   profileAccent = ref("#7857ff"),
+  profileBackground = ref("#21152c"),
+  profileBackgroundImage = ref(""),
+  profileBackgroundBlur = ref(0),
+  profileBackgroundDim = ref(24),
   profileCss = ref(""),
+  profileServerTag = ref(""),
+  profileServerTagEmoji = ref(""),
   uploading = ref(""),
   cropper = ref(null),
   cropZoom = ref(1),
@@ -285,10 +300,12 @@ const activeCommunity = computed(
     ...federatedGuildEmojis.value,
     ...customEmojis.value,
   ]),
-  communityMemberTag = computed(() => ({
-    text: String(activeCommunity.value?.profile?.memberTag || "").trim(),
-    emoji: String(activeCommunity.value?.profile?.memberTagEmoji || "").trim(),
-  })),
+  communityMemberTag = computed(() => {
+    const community = activeCommunity.value;
+    const published = { text: String(community?.profile?.memberTag || "").trim(), emoji: String(community?.profile?.memberTagEmoji || "").trim() };
+    const selected = settings.value.serverTag;
+    return selected?.text ? selected : published;
+  }),
   communityAtmosphereStyle = computed(() => {
     const atmosphere = { ...(activeCommunity.value?.profile?.atmosphere || {}) };
     if (!atmosphere.backgroundUrl && activeCommunity.value?.banner_url) {
@@ -316,6 +333,11 @@ const sidebarChannelGroups = computed(() => {
     .filter((group) => group.channels.length);
   const uncategorized = channels.filter((channel) => !channel.category_id || !guildCategories.value.some((category) => category.id === channel.category_id));
   return uncategorized.length ? [{ id: "uncategorized", name: "Channels", channels: uncategorized }, ...groups] : groups;
+});
+const filteredDiscoverCommunities = computed(() => {
+  const trait = discoverTrait.value.trim().toLowerCase();
+  if (!trait) return discoverCommunities.value;
+  return discoverCommunities.value.filter((community) => (community.profile?.traits || []).some((value) => String(value).trim().toLowerCase().includes(trait)));
 });
 const displayedMessages = computed(() => {
   const query = messageSearch.value.trim().toLowerCase();
@@ -368,6 +390,9 @@ function atmosphereStyle(atmosphere = {}) {
     "--community-glass": `${atmosphere.glass || 72}%`,
     background,
   };
+}
+function communityBannerUrl(community) {
+  return community?.banner_url || community?.bannerUrl || community?.profile?.bannerUrl || community?.profile?.banner_url || "";
 }
 const permissionChoices = [
   ["View channels", 1024],
@@ -530,6 +555,7 @@ async function api(path, options = {}) {
   try {
     response = await fetch(serverOrigin ? `${serverOrigin}${path}` : path, {
       credentials: "include",
+      cache: "no-store",
       ...options,
       headers: { "content-type": "application/json", ...options.headers },
     });
@@ -597,6 +623,7 @@ async function submitAuth() {
 }
 async function beginSession(nextUser) {
   user.value = nextUser;
+  loadFriendGroups();
   settings.value = { ...settings.value, ...nextUser.settings };
   settings.value.selectedUsernameStyleIds = Array.isArray(settings.value.selectedUsernameStyleIds) ? settings.value.selectedUsernameStyleIds : [];
   setProfileForm(nextUser);
@@ -674,6 +701,18 @@ async function beginSession(nextUser) {
   }
 }
 async function refreshFriends() { const result = await api("/api/v1/friends"); friends.value = result.friends || []; friendRequests.value = result.requests || []; }
+function friendGroupsKey() { return `libracord-friend-groups:${user.value?.id || "guest"}`; }
+function loadFriendGroups() { try { friendGroups.value = JSON.parse(localStorage.getItem(friendGroupsKey()) || "[]"); } catch { friendGroups.value = []; } }
+function saveFriendGroups() { localStorage.setItem(friendGroupsKey(), JSON.stringify(friendGroups.value)); }
+function clearServerTag(communityId) { const tags = { ...(settings.value.serverTags || {}) }; delete tags[communityId]; settings.value.serverTags = tags; }
+function communityTagKey(community) { return String(community?.address || community?.global_id || community?.id || ""); }
+function openCustomDialog(options = {}) { return new Promise((resolve) => { customDialog.value = { title: options.title || "Enter a value", message: options.message || "", value: options.value || "", placeholder: options.placeholder || "", type: options.type || "text", confirmLabel: options.confirmLabel || "Continue", resolve }; }); }
+function closeCustomDialog(result = null) { const dialog = customDialog.value; customDialog.value = null; dialog?.resolve(result); }
+async function createFriendGroup() { const name = await openCustomDialog({ title: "Create friend group", message: "Give this group a name.", placeholder: "e.g. Close friends", confirmLabel: "Create group" }); if (!name?.trim()) return; friendGroups.value.push({ id: crypto.randomUUID(), name: name.trim().slice(0, 32), members: [] }); saveFriendGroups(); }
+function deleteFriendGroup(group) { friendGroups.value = friendGroups.value.filter((item) => item.id !== group.id); if (activeFriendGroup.value === group.id) activeFriendGroup.value = "all"; saveFriendGroups(); }
+function dragFriend(event, friend) { event.dataTransfer.setData("text/libracord-friend", friend.id); }
+function dropFriendIntoGroup(event, group) { event.preventDefault(); const id = event.dataTransfer.getData("text/libracord-friend"); if (!id) return; group.members = [...new Set([...(group.members || []), id])]; saveFriendGroups(); }
+function friendsForActiveGroup() { const group = friendGroups.value.find((item) => item.id === activeFriendGroup.value); return group ? friends.value.filter((friend) => group.members?.includes(friend.id)) : friends.value; }
 const dmKeyStorage = () => `libracord-dm-key:${serverOrigin || location.origin}`;
 function bytesToBase64(bytes) { let binary = ""; bytes.forEach((b) => { binary += String.fromCharCode(b); }); return btoa(binary); }
 function base64ToBytes(value) { return Uint8Array.from(atob(value), (c) => c.charCodeAt(0)); }
@@ -768,7 +807,7 @@ async function joinDmCall(otherId) {
     dynacast: false,
     publishDefaults: { videoCodec: preferredVideoCodec() },
   });
-  room.on(RoomEvent.TrackSubscribed, (track) => { if (track.kind === Track.Kind.Audio) { const audio = document.createElement("audio"); audio.autoplay = true; audio.srcObject = new MediaStream([track.mediaStreamTrack]); document.body.appendChild(audio); } else if (track.kind === Track.Kind.Video) { const video = document.createElement("video"); video.autoplay = true; video.playsInline = true; video.srcObject = new MediaStream([track.mediaStreamTrack]); let media = document.querySelector(".dm-call-media"); if (!media) { media = document.createElement("div"); media.className = "dm-call-media"; document.querySelector(".dm-call-card")?.prepend(media); } media.appendChild(video); } });
+  room.on(RoomEvent.TrackSubscribed, (track) => { if (track.kind === Track.Kind.Audio) { const audio = document.createElement("audio"); audio.className = "dm-call-audio"; audio.autoplay = true; audio.srcObject = new MediaStream([track.mediaStreamTrack]); document.body.appendChild(audio); } else if (track.kind === Track.Kind.Video) { const video = document.createElement("video"); video.autoplay = true; video.playsInline = true; video.srcObject = new MediaStream([track.mediaStreamTrack]); let media = document.querySelector(".dm-call-media"); if (!media) { media = document.createElement("div"); media.className = "dm-call-media"; document.querySelector(".dm-call-card")?.prepend(media); } media.appendChild(video); } });
   await room.connect(credentials.url, credentials.token);
   await room.localParticipant.setMicrophoneEnabled(true);
   await room.localParticipant.setCameraEnabled(true);
@@ -776,7 +815,12 @@ async function joinDmCall(otherId) {
   if (localVideo) { const video = document.createElement("video"); video.autoplay = true; video.muted = true; video.playsInline = true; video.srcObject = new MediaStream([localVideo.mediaStreamTrack]); let media = document.querySelector(".dm-call-media"); if (!media) { media = document.createElement("div"); media.className = "dm-call-media"; document.querySelector(".dm-call-card")?.prepend(media); } media.appendChild(video); }
   dmCallRoom.value = markRaw(room);
 }
-async function leaveDmCall() { if (dmCallRoom.value) await dmCallRoom.value.disconnect(); dmCallRoom.value = null; }
+async function leaveDmCall() {
+  if (dmCallRoom.value) await dmCallRoom.value.disconnect();
+  document.querySelectorAll(".dm-call-audio").forEach((element) => { element.pause(); element.srcObject = null; element.remove(); });
+  document.querySelector(".dm-call-media")?.remove();
+  dmCallRoom.value = null;
+}
 async function toggleDmMute() { if (!dmCallRoom.value) return; dmCallMuted.value = !dmCallMuted.value; await dmCallRoom.value.localParticipant.setMicrophoneEnabled(!dmCallMuted.value); }
 function announceDmTyping() { if (dmTarget.value) socket.emit("dm:typing", { recipientId: dmTarget.value.id, typing: true }); }
 function announceTyping() {
@@ -871,13 +915,9 @@ async function selectChannel(channel) {
   }
   socket.emit("channel:join", channel.id);
   messages.value = (await api(`/api/v1/channels/${channel.id}/messages`)).messages || [];
-  messageRefreshTimer.value = setInterval(async () => {
-    if (selected.value?.id !== channel.id || selected.value?.kind !== "text") return;
-    try {
-      const latest = await api(`/api/v1/channels/${channel.id}/messages`);
-      if (selected.value?.id === channel.id) messages.value = latest.messages || [];
-    } catch {}
-  }, 2000);
+  // Message delivery is realtime over Socket.IO. Avoid polling the entire
+  // list because replacing the array can disturb a user's scroll position.
+  messageRefreshTimer.value = null;
 }
 async function sendMessage() {
   const body = draft.value.trim();
@@ -920,7 +960,9 @@ async function uploadMessageAttachment(event) {
 }
 function reactToMessage(message, emoji = "❤️") {
   const current = messageReactions.value[message.id] || [];
-  messageReactions.value = { ...messageReactions.value, [message.id]: current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji] };
+  const next = current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji];
+  messageReactions.value = { ...messageReactions.value, [message.id]: next };
+  socket.emit("message:reaction", { channelId: message.channel_id || selected.value?.id, messageId: message.id, emoji });
 }
 function reactionCustomEmoji(reaction) {
   const match = String(reaction || "").match(/^:([^:]+):$/);
@@ -1069,6 +1111,7 @@ async function uploadEmoji() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Emoji upload failed");
     customEmojis.value.push(result.emoji);
+    socket.emit("emoji:changed", { communityId: "" });
     emojiName.value = "";
     emojiFile.value = null;
     error.value = "";
@@ -1082,6 +1125,7 @@ async function removeEmoji(emoji) {
   customEmojis.value = customEmojis.value.filter(
     (item) => item.id !== emoji.id,
   );
+  socket.emit("emoji:changed", { communityId: "" });
 }
 async function uploadGuildEmoji() {
   if (!guildEmojiFile.value || !guildEmojiName.value.trim()) return;
@@ -1096,6 +1140,7 @@ async function uploadGuildEmoji() {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Emoji upload failed");
     guildEmojis.value.push(result.emoji);
+    socket.emit("emoji:changed", { communityId: activeCommunity.value.id });
     guildEmojiName.value = "";
     guildEmojiFile.value = null;
     saved.value = "Community emoji uploaded";
@@ -1108,6 +1153,7 @@ async function removeGuildEmoji(emoji) {
     method: "DELETE",
   });
   guildEmojis.value = guildEmojis.value.filter((item) => item.id !== emoji.id);
+  socket.emit("emoji:changed", { communityId: activeCommunity.value.id });
 }
 async function joinVoice(channel) {
   await leaveVoice();
@@ -1134,6 +1180,7 @@ async function joinVoice(channel) {
         // otherwise be heard as a delayed duplicate.
         if (participant?.sid === room.localParticipant.sid || participant?.identity === user.value?.id) return;
         const element = document.createElement("audio");
+        element.dataset.trackId = track.mediaStreamTrack.id;
         element.srcObject = new MediaStream([track.mediaStreamTrack]);
         element.autoplay = true;
         element.playsInline = true;
@@ -1169,6 +1216,11 @@ async function joinVoice(channel) {
     room.on(RoomEvent.ParticipantConnected, () => { syncVoiceParticipants(); updateVoiceStatus(); socket.emit("voice:changed", channel.id); });
     room.on(RoomEvent.ParticipantDisconnected, () => { syncVoiceParticipants(); updateVoiceStatus(); socket.emit("voice:changed", channel.id); });
     room.on(RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
+      if (track.kind === Track.Kind.Audio) {
+        const element = document.querySelector(`#remote-audio audio[data-track-id="${CSS.escape(track.mediaStreamTrack.id)}"]`);
+        if (element) { element.pause(); element.srcObject = null; element.remove(); }
+        return;
+      }
       if (track.kind !== Track.Kind.Video) return;
       const sid = participant?.sid || track.participant?.sid;
       const isScreen = publication?.source === Track.Source.ScreenShare || String(publication?.source || "").toLowerCase().includes("screen");
@@ -2012,15 +2064,26 @@ async function openHome(tab = "feed") {
     ).communities;
 }
 async function publishStatus() {
-  if (!homePostDraft.value.trim()) return;
+  if (!homePostDraft.value.trim() && !homePostAttachments.value.length) return;
   const result = await api("/api/v1/home/posts", {
     method: "POST",
-    body: JSON.stringify({ body: homePostDraft.value }),
+    body: JSON.stringify({ body: homePostDraft.value, attachments: homePostAttachments.value, replyTo: pulseReplyTo.value?.id || null }),
   });
   homePosts.value.unshift(result.post);
   homePostDraft.value = "";
+  homePostAttachments.value = [];
+  pulseReplyTo.value = null;
   await openHome("feed");
 }
+async function uploadPulseAttachment(event) {
+  const file = event.target.files?.[0]; event.target.value = "";
+  if (!file) return;
+  const form = new FormData(); form.append("file", file);
+  const response = await fetch(apiEndpoint("/api/v1/home/posts/draft/attachments"), { method: "POST", credentials: "include", body: form });
+  const payload = await response.json();
+  if (response.ok) homePostAttachments.value.push(payload.attachment); else error.value = payload.error || "Upload failed";
+}
+async function boostPulse(post) { await api(`/api/v1/home/posts/${post.id}/boost`, { method: "POST" }); post.boost_count = Number(post.boost_count || 0) + 1; }
 function publishedKindForTab() {
   return {
     themes: "theme",
@@ -2103,7 +2166,7 @@ function profileThemeStyle(profile) {
   const theme = publishedItem(
     profile?.profile_theme_id || settings.value.selectedProfileThemeId,
   );
-  if (!theme) return {};
+  if (!theme) return profile?.profile_background_image ? { backgroundImage: `url(${apiEndpoint(profile.profile_background_image)})`, backgroundSize: "cover", backgroundPosition: "center" } : {};
   const accent = theme.payload.accentColor || "#62efc6";
   const background = theme.payload.backgroundColor || "#081623";
   const text = theme.payload.textColor || "#ffffff";
@@ -2147,7 +2210,7 @@ async function publishCreation() {
     kind === "theme"
       ? activeCommunity.value?.profile?.atmosphere || {}
       : kind === "profile-theme"
-        ? { accentColor: profileAccent.value, css: profileCss.value, imageUrl }
+        ? { accentColor: profileAccent.value, backgroundColor: profileBackground.value, imageUrl: profileBackgroundImage.value || imageUrl, backgroundBlur: profileBackgroundBlur.value, backgroundDim: profileBackgroundDim.value, css: profileCss.value }
         : {
             accentColor: profileAccent.value,
             secondaryColor: "#f15bb5",
@@ -2707,7 +2770,13 @@ function setProfileForm(profile) {
   profileBanner.value = profile.banner_url || "";
   profileBio.value = profile.bio || "";
   profileAccent.value = profile.accent_color || "#7857ff";
+  profileBackground.value = profile.settings?.profileBackground || "#21152c";
+  profileBackgroundImage.value = profile.settings?.profileBackgroundImage || "";
+  profileBackgroundBlur.value = Number(profile.settings?.profileBackgroundBlur || 0);
+  profileBackgroundDim.value = Number(profile.settings?.profileBackgroundDim ?? 24);
   profileCss.value = profile.profile_css || "";
+  profileServerTag.value = profile.server_tag || "";
+  profileServerTagEmoji.value = profile.server_tag_emoji || "";
 }
 async function openSettings() {
   settingsOpen.value = true;
@@ -2776,6 +2845,7 @@ function showUserMenu(event, subject) {
     name: subject.username || subject.author_name,
     voiceSid: subject.voiceSid || null,
     voiceVolume: subject.voiceSid ? Number(voiceUserVolumes.value[subject.voiceSid] ?? 100) : null,
+    messageId: subject.id && subject.body !== undefined ? subject.id : null,
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - 300)),
     y: Math.max(8, Math.min(event.clientY > window.innerHeight / 2 ? event.clientY - 430 : event.clientY, window.innerHeight - 520)),
   };
@@ -2804,6 +2874,8 @@ function mentionUser() {
   userMenu.value = null;
   activeProfile.value = null;
 }
+function editMessageFromMenu() { const message = messages.value.find((item) => Number(item.id) === Number(userMenu.value?.messageId)); const body = window.prompt("Edit message", message?.body || ""); if (body?.trim()) socket.emit("message:edit", { messageId: message.id, body: body.trim() }); userMenu.value = null; }
+function deleteMessageFromMenu() { if (window.confirm("Delete this message?")) socket.emit("message:delete", { messageId: userMenu.value?.messageId }); userMenu.value = null; }
 async function copyUserId() {
   await navigator.clipboard.writeText(userMenu.value.id);
   userMenu.value = null;
@@ -2879,6 +2951,16 @@ async function uploadProfileImage(kind, file) {
     uploading.value = "";
   }
 }
+async function uploadProfileBackground(file) {
+  if (!file) return;
+  try {
+    const form = new FormData(); form.append("image", file);
+    const response = await fetch(apiEndpoint("/api/v1/home/published/assets"), { method: "POST", credentials: "include", body: form });
+    const result = await response.json(); if (!response.ok) throw new Error(result.error || "Upload failed");
+    profileBackgroundImage.value = result.asset.url;
+    saved.value = "Profile background uploaded";
+  } catch (e) { error.value = e.message; }
+}
 function applyAppearance() {
   const root = document.documentElement;
   const preferredTheme = settings.value.theme === "system"
@@ -2897,6 +2979,10 @@ function applyAppearance() {
 async function saveSettings() {
   error.value = "";
   saved.value = "";
+  settings.value.profileBackground = profileBackground.value;
+  settings.value.profileBackgroundImage = profileBackgroundImage.value;
+  settings.value.profileBackgroundBlur = profileBackgroundBlur.value;
+  settings.value.profileBackgroundDim = profileBackgroundDim.value;
   try {
     if (settings.value.notifications && typeof Notification !== "undefined" && Notification.permission === "default")
       await Notification.requestPermission();
@@ -2971,21 +3057,45 @@ socket.on("voice:message:created", (message) => {
     voiceMessages.value.push(message);
 });
 socket.on("voice:media:state", (state) => applySharedMediaState(state));
+socket.on("message:reactions", ({ channelId, messageId, reactions } = {}) => {
+  if (String(channelId) !== String(selected.value?.id)) return;
+  messageReactions.value = { ...messageReactions.value, [messageId]: Array.isArray(reactions) ? reactions : [] };
+});
+socket.on("message:updated", (message) => { const index = messages.value.findIndex((item) => item.id === message.id); if (index >= 0) messages.value[index] = { ...messages.value[index], ...message, edited_at: new Date().toISOString() }; });
+socket.on("message:deleted", ({ messageId } = {}) => { const message = messages.value.find((item) => Number(item.id) === Number(messageId)); if (message) Object.assign(message, { body: "", deleted_at: new Date().toISOString() }); });
+socket.on("emoji:changed", async ({ communityId } = {}) => {
+  if (communityId && String(communityId) !== String(activeCommunityId.value)) return;
+  try {
+    const result = await api(`/api/v1/emojis${activeCommunityId.value ? `?guildId=${activeCommunityId.value}` : ""}`);
+    customEmojis.value = result.emojis || [];
+    guildEmojis.value = result.guild_emojis || [];
+    federatedGuildEmojis.value = [...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values()];
+  } catch {}
+});
 socket.on("voice:presence-changed", (communityId) => {
   if (String(communityId) === String(activeCommunityId.value)) refreshVoicePresence();
 });
 socket.on("profile:updated", async ({ userId } = {}) => {
-  if (!activeCommunityId.value) return;
+  if (!activeCommunityId.value && page.value !== "home") return;
   try {
-    const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/members`);
-    guildMembers.value = result.members || [];
+    if (activeCommunityId.value) {
+      const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/members`);
+      guildMembers.value = result.members || [];
+    }
     if (activeProfile.value?.id === userId) await openProfile(userId, activeProfileMode.value);
+    if (page.value === "home") {
+      const catalog = await api("/api/v1/home/federated");
+      publishedItems.value = catalog.items || [];
+    }
   } catch {
     // A profile update should never interrupt the current session.
   }
 });
+socket.on("friends:updated", () => { void refreshFriends().catch(() => {}); });
 socket.on("community:changed", ({ communityId } = {}) => {
-  refreshCommunityFromServer(communityId);
+  void refreshCommunityFromServer(communityId);
+  void api("/api/v1/guilds").then((result) => { communities.value = result.guilds || []; }).catch(() => {});
+  if (homeTab.value === "discover") void api("/api/v1/discovery/communities").then((result) => { discoverCommunities.value = result.communities || []; }).catch(() => {});
 });
 socket.on("federation:membership", async () => {
   communities.value = (await api("/api/v1/guilds")).guilds || [];
@@ -3097,16 +3207,19 @@ onMounted(async () => {
     connectionState.value = "offline";
     connectionDetail.value = "Your internet connection is offline.";
   });
+  friendRefreshTimer.value = setInterval(() => { if (user.value) void refreshFriends().catch(() => {}); }, 5000);
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleLightboxKey);
   clearInterval(networkTimer);
   clearInterval(mediaClockTimer);
+  clearInterval(friendRefreshTimer.value);
   dockObserver?.disconnect();
   document.removeEventListener("contextmenu", showAppMenu);
   window.removeEventListener("online", retryConnection);
   socket.disconnect();
   leaveVoice();
+  leaveDmCall();
 });
 watch(user, () => nextTick(setupCommunityDock));
 watch([page, homeTab, activeCommunityId, selected, dmTarget], () => {
@@ -3140,6 +3253,14 @@ watch(
 </script>
 
 <template>
+  <div v-if="customDialog" class="custom-dialog-backdrop" @click.self="closeCustomDialog()">
+    <form class="custom-dialog" @submit.prevent="closeCustomDialog(customDialog.value)">
+      <h2>{{ customDialog.title }}</h2>
+      <p v-if="customDialog.message">{{ customDialog.message }}</p>
+      <input v-model="customDialog.value" :type="customDialog.type" :placeholder="customDialog.placeholder" autofocus />
+      <div class="custom-dialog-actions"><button type="button" @click="closeCustomDialog()">Cancel</button><button type="submit" class="primary">{{ customDialog.confirmLabel }}</button></div>
+    </form>
+  </div>
   <div
     v-if="appBooting || connectionState !== 'connected'"
     class="connection-overlay"
@@ -3542,7 +3663,7 @@ watch(
           <span v-else>{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
         </button>
       </div>
-      <div v-if="selected?.kind === 'text'" class="messages">
+      <div v-if="selected?.kind === 'text'" ref="messageListElement" class="messages">
         <section v-if="selected?.kind === 'text' && !displayedMessages.length" class="channel-empty-state">
           <span>#</span>
           <h2>Welcome to #{{ selected?.name }}</h2>
@@ -4133,7 +4254,7 @@ watch(
         </div>
       </header>
       <div v-if="homeTab === 'dm'" class="dm-page"><aside class="dm-sidebar"><input placeholder="Find or start a conversation" /><h3>Direct Messages</h3><button v-for="friend in openDmUsers" :key="friend.id" class="dm-contact" :class="{ active: dmTarget?.id === friend.id }" @click="openDm(friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="apiEndpoint(friend.avatar_url)" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><strong>{{ friend.display_name }} <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</small></button></aside><section class="dm-conversation"><header><span class="avatar"><img v-if="dmTarget?.avatar_url" :src="apiEndpoint(dmTarget.avatar_url)" alt="" />{{ !dmTarget?.avatar_url ? (dmTarget?.display_name?.[0] || 'D') : '' }}</span><div><h2>{{ dmTarget?.display_name || 'Direct messages' }} <b v-if="dmTarget?.system" class="system-badge">SYSTEM</b></h2><small>{{ dmTarget ? dmTarget.username : 'Choose a friend to start chatting' }}</small></div><div v-if="dmTarget && !dmTarget.system" class="dm-call-actions"><button type="button" title="Voice call" @click="startDmCall('audio')"><FontAwesomeIcon :icon="faPhoneSlash" /></button><button type="button" title="Video call" @click="startDmCall('video')"><FontAwesomeIcon :icon="faCamera" /></button><button type="button" title="Screen share" @click="startDmCall('screen')"><FontAwesomeIcon :icon="faDisplay" /></button></div></header><div class="dm-messages"><template v-if="dmTarget"><article v-for="message in dmMessages" :key="message.id" :class="{ 'system-message': message.kind === 'system' }"><img v-if="message.avatar_url" class="avatar image" :src="apiEndpoint(message.avatar_url)" alt="" /><span v-else class="avatar">{{ message.author_name?.[0] }}</span><div><strong>{{ message.author_name }} <b v-if="message.kind === 'system'" class="system-badge">SYSTEM</b></strong><p>{{ message.body }}</p><small>{{ new Date(message.created_at).toLocaleString() }}</small></div></article><p v-if="!dmMessages.length" class="empty">Start a conversation.</p></template><p v-else class="empty">Select a conversation from the left.</p></div><form v-if="dmTarget && !dmTarget.system" class="dm-composer" @submit.prevent="sendDm"><input v-model="dmDraft" :placeholder="`Message ${dmTarget.display_name || ''}`" maxlength="4000" /><button class="primary">Send</button></form><div v-else-if="dmTarget?.system" class="dm-system-notice">Official instance messages are read-only.</div></section></div>
-      <div v-else-if="homeTab === 'friends'" class="home-feed friends-page"><span class="eyebrow">HOME · FRIENDS</span><h2>Friends</h2><form class="friend-add" @submit.prevent="addFriend"><input v-model="friendUsername" placeholder="Add by username" /><button class="primary">Add friend</button></form><section v-if="friendRequests.length"><h3>Requests</h3><article v-for="request in friendRequests" :key="request.id"><strong>{{ request.display_name }}</strong><button class="primary" @click="acceptFriend(request)">Accept</button></article></section><h3>Your friends</h3><article v-for="friend in friends" :key="friend.id" class="friend-row"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><div><strong>{{ friend.display_name }}</strong><small>{{ friend.username }}</small><p>{{ friend.status_text || 'Online' }}</p></div><button class="friend-message" title="Message" @click="openDm(friend)"><FontAwesomeIcon :icon="faComments" /></button><button @click="removeFriendEntry(friend)">Remove</button></article><p v-if="!friends.length" class="empty">No friends yet.</p></div>
+      <div v-else-if="homeTab === 'friends'" class="home-feed friends-page"><span class="eyebrow">HOME · FRIENDS</span><h2>Friends</h2><div class="friend-groups-bar"><button type="button" :class="{ selected: activeFriendGroup === 'all' }" @click="activeFriendGroup = 'all'">All friends <span>{{ friends.length }}</span></button><button v-for="group in friendGroups" :key="group.id" type="button" :class="{ selected: activeFriendGroup === group.id }" @click="activeFriendGroup = group.id" @dragover.prevent @drop="dropFriendIntoGroup($event, group)">{{ group.name }} <span>{{ group.members?.length || 0 }}</span><b title="Delete group" @click.stop="deleteFriendGroup(group)">×</b></button><button type="button" class="primary" @click="createFriendGroup">＋ Group</button></div><form class="friend-add" @submit.prevent="addFriend"><input v-model="friendUsername" placeholder="Add by username" /><button class="primary">Add friend</button></form><section v-if="friendRequests.length"><h3>Requests</h3><article v-for="request in friendRequests" :key="request.id"><strong>{{ request.display_name }}</strong><button class="primary" @click="acceptFriend(request)">Accept</button></article></section><h3>{{ activeFriendGroup === 'all' ? 'Your friends' : (friendGroups.find((group) => group.id === activeFriendGroup)?.name || 'Friends') }}</h3><article v-for="friend in friendsForActiveGroup()" :key="friend.id" class="friend-row" draggable="true" @dragstart="dragFriend($event, friend)"><span class="avatar"><img v-if="friend.avatar_url" :src="friend.avatar_url" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}</span><div><strong>{{ friend.display_name }}</strong><small>{{ friend.username }}</small><p>{{ friend.status_text || 'Online' }}</p></div><button class="friend-message" title="Message" @click="openDm(friend)"><FontAwesomeIcon :icon="faComments" /></button><button @click="removeFriendEntry(friend)">Remove</button></article><p v-if="!friendsForActiveGroup().length" class="empty">No friends in this group yet. Drag friends onto its chip above.</p></div>
       <div v-else-if="homeTab === 'feed'" class="home-feed">
         <form class="status-composer" @submit.prevent="publishStatus">
           <div>
@@ -4145,7 +4266,7 @@ watch(
             ></textarea>
           </div>
           <footer>
-            <small>{{ homePostDraft.length }}/1000</small
+            <label class="pulse-attachment-button">📎<input type="file" accept="image/*,video/*,audio/*" @change="uploadPulseAttachment" /></label><small>{{ homePostDraft.length }}/1000</small
             ><button class="primary">Publish pulse</button>
           </footer>
         </form>
@@ -4174,9 +4295,10 @@ watch(
               >
             </header>
             <p>{{ post.body }}</p>
+            <div v-if="post.attachments?.length" class="pulse-attachments"><img v-for="attachment in post.attachments" v-if="attachment.mimeType?.startsWith('image/')" :key="attachment.id" :src="apiEndpoint(attachment.url)" :alt="attachment.name" /><a v-for="attachment in post.attachments" v-else :key="attachment.id" :href="apiEndpoint(attachment.url)" target="_blank">{{ attachment.name }}</a></div>
             <footer>
-              <button disabled title="Pulse replies are not available yet">Reply</button
-              ><button disabled title="Pulse boosts are not available yet">Boost</button
+              <button type="button" @click="pulseReplyTo = post; homePostDraft = `@${post.username} `; homeTab = 'feed'">Reply</button
+              ><button type="button" @click="boostPulse(post)">Boost {{ post.boost_count || 0 }}</button
               ><button disabled title="Pulse reactions are not available yet">React</button>
             </footer>
           </div>
@@ -4186,14 +4308,17 @@ watch(
         </p>
       </div>
       <div v-else-if="homeTab === 'discover'" class="discovery-grid">
+        <div class="discovery-filters"><input v-model="discoverTrait" placeholder="Filter by community trait (e.g. gaming, art, music)" /><button v-if="discoverTrait" type="button" @click="discoverTrait = ''">Clear</button></div>
         <article
-          v-for="guild in discoverCommunities"
+          v-for="guild in filteredDiscoverCommunities"
           :key="guild.id"
-          :style="guild.banner_url ? { backgroundImage: `linear-gradient(180deg, #07131e35, #07131ef5), url(${apiEndpoint(guild.banner_url)})` } : atmosphereStyle(guild.profile?.atmosphere)"
+          :class="{ 'has-discover-banner': communityBannerUrl(guild) }"
+          :style="communityBannerUrl(guild) ? { '--discover-banner': `linear-gradient(180deg, #07131e35, #07131ef5), url(${apiEndpoint(communityBannerUrl(guild))})` } : atmosphereStyle(guild.profile?.atmosphere)"
         >
           <span><img v-if="guild.icon_url" :src="apiEndpoint(guild.icon_url)" alt="" /><b v-else>{{ guild.name[0] }}</b></span>
           <h3>{{ guild.name }}</h3>
           <p>{{ guild.description }}</p>
+          <div v-if="guild.profile?.traits?.filter(Boolean).length" class="community-traits"><button v-for="trait in guild.profile.traits.filter(Boolean)" :key="trait" type="button" @click="discoverTrait = trait">{{ trait }}</button></div>
           <code v-if="guild.address" class="community-address" :title="guild.address">{{ guild.address }}</code>
           <button
             v-if="!guild.remote && communities.some((entry) => entry.id === guild.id)"
@@ -4383,6 +4508,7 @@ watch(
       <button @click="openProfile(userMenu.id)">Profile</button>
       <button @click="openDm({ id: userMenu.id, display_name: userMenu.name })">Message</button>
       <button @click="mentionUser">Mention</button>
+      <template v-if="userMenu.messageId && userMenu.id === user.id"><div class="context-separator"></div><button @click="editMessageFromMenu">Edit message</button><button class="danger" @click="deleteMessageFromMenu">Delete message</button></template>
       <template v-if="userMenu.voiceSid">
         <div class="context-separator"></div>
         <label class="voice-volume-control"><span>Voice volume <output>{{ userMenu.voiceVolume }}%</output></span><input v-model.number="userMenu.voiceVolume" type="range" min="0" max="200" step="1" @input="setVoiceUserVolume(userMenu.voiceSid, userMenu.voiceVolume)" /></label>
@@ -5369,7 +5495,7 @@ watch(
       <article
         class="profile-card social-profile-card"
         :style="[
-          { '--profile-accent': activeProfile.accent_color },
+          { '--profile-accent': activeProfile.accent_color, '--profile-card-bg': activeProfile.profile_background || '#21152c', '--profile-card-bg-image': activeProfile.profile_background_image ? `url(${apiEndpoint(activeProfile.profile_background_image)})` : 'none', '--profile-bg-blur': `${activeProfile.profile_background_blur || 0}px`, '--profile-bg-dim': `${Number(activeProfile.profile_background_dim || 0) / 100}` },
           profileThemeStyle(activeProfile),
           activeProfile.profile_css,
         ]"
@@ -5651,9 +5777,25 @@ watch(
                   >{{ profileBio.length }}/500</small
                 ></label
               >
+              <section class="server-tag-choices">
+                <h3>Server tags</h3>
+                <p class="upload-help">Choose the tag to show on your profile in each community.</p>
+                <div class="server-tag-choice server-tag-choice-global">
+                  <button type="button" :class="{ selected: !settings.serverTag }" @click="settings.serverTag = null">No tag</button>
+                  <template v-for="community in communities" :key="community.id">
+                    <button v-if="community.profile?.memberTag" type="button" :class="{ selected: settings.serverTag?.text === community.profile.memberTag && settings.serverTag?.emoji === (community.profile.memberTagEmoji || '') }" @click="settings.serverTag = { text: community.profile.memberTag, emoji: community.profile.memberTagEmoji || '' }">{{ community.profile.memberTagEmoji }}{{ community.profile.memberTag }} <small>({{ community.name }})</small></button>
+                  </template>
+                </div>
+              </section>
               <label
                 >Accent color<input v-model="profileAccent" type="color"
               /></label>
+              <label
+                >Card background<input v-model="profileBackground" type="color"
+              /></label>
+              <label>Card background image or GIF<input type="file" accept="image/png,image/jpeg,image/gif,image/webp" @change="uploadProfileBackground($event.target.files?.[0])" /></label>
+              <label>Background blur <output>{{ profileBackgroundBlur }}px</output><input v-model.number="profileBackgroundBlur" type="range" min="0" max="24" step="1" /></label>
+              <label>Background dim <output>{{ profileBackgroundDim }}%</output><input v-model.number="profileBackgroundDim" type="range" min="0" max="90" step="1" /></label>
               <label
                 >Custom CSS declarations<textarea
                   v-model="profileCss"
@@ -5749,6 +5891,7 @@ watch(
                 class="profile-card preview-card"
                 :style="[
                   { '--profile-accent': profileAccent },
+                  { background: profileBackground, '--profile-card-bg-image': profileBackgroundImage ? `url(${apiEndpoint(profileBackgroundImage)})` : 'none', '--profile-bg-blur': `${profileBackgroundBlur}px`, '--profile-bg-dim': `${profileBackgroundDim / 100}` },
                   profileThemeStyle(),
                   profileCss,
                 ]"
@@ -5784,7 +5927,7 @@ watch(
                       profileDecoration().payload.icon || "✦"
                     }}</b></span
                   >
-                  <h3>{{ profileName || "Display name" }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></h3>
+                  <h3>{{ profileName || "Display name" }} <span v-if="profileServerTag" class="community-member-tag"><i>{{ profileServerTagEmoji }}</i>{{ profileServerTag }}</span></h3>
                   <div class="profile-handle">
                     {{ profileUsername || "username" }}@{{ user.home_server }}
                   </div>

@@ -42,7 +42,7 @@ db.exec(`
  CREATE TABLE IF NOT EXISTS guild_invites(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,code TEXT NOT NULL UNIQUE,creator_id TEXT NOT NULL,max_uses INTEGER NOT NULL DEFAULT 0,uses INTEGER NOT NULL DEFAULT 0,expires_at TEXT,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS guild_webhooks(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,name TEXT NOT NULL,token_hash TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS instance_emojis(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE COLLATE NOCASE,asset_id TEXT NOT NULL,creator_id TEXT NOT NULL,guild_id TEXT,created_at TEXT NOT NULL,FOREIGN KEY(asset_id) REFERENCES assets(id),FOREIGN KEY(creator_id) REFERENCES users(id));
- CREATE TABLE IF NOT EXISTS social_posts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
+ CREATE TABLE IF NOT EXISTS social_posts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,attachments TEXT NOT NULL DEFAULT '[]',reply_to TEXT,boost_count INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS published_items(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('theme','decoration','profile-theme')),name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS user_collections(user_id TEXT NOT NULL,item_id TEXT NOT NULL,added_at TEXT NOT NULL,PRIMARY KEY(user_id,item_id),FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS friend_requests(id TEXT PRIMARY KEY,from_user TEXT NOT NULL,to_user TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',created_at TEXT NOT NULL,UNIQUE(from_user,to_user),FOREIGN KEY(from_user) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(to_user) REFERENCES users(id) ON DELETE CASCADE);
@@ -73,11 +73,15 @@ for (const [name, definition] of [
   if (!db.prepare("SELECT 1 FROM pragma_table_info('federation_peers') WHERE name=?").get(name))
     db.exec(`ALTER TABLE federation_peers ADD COLUMN ${name} ${definition}`);
 }
+for (const [name, definition] of [["server_tag", "TEXT NOT NULL DEFAULT ''"], ["server_tag_emoji", "TEXT NOT NULL DEFAULT ''"]])
+  if (!db.prepare("SELECT 1 FROM pragma_table_info('users') WHERE name=?").get(name)) db.exec(`ALTER TABLE users ADD COLUMN ${name} ${definition}`);
 for (const [name, definition] of [["attachments", "TEXT NOT NULL DEFAULT '[]'"], ["content_warning", "TEXT NOT NULL DEFAULT ''"], ["reply_to", "INTEGER"]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
 }
+for (const [name, definition] of [["edited_at", "TEXT"], ["deleted_at", "TEXT"]]) if (!db.prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name=?").get(name)) db.exec(`ALTER TABLE messages ADD COLUMN ${name} ${definition}`);
 if (!db.prepare("SELECT 1 FROM pragma_table_info('channels') WHERE name=?").get("e2ee_enabled")) db.exec("ALTER TABLE channels ADD COLUMN e2ee_enabled INTEGER NOT NULL DEFAULT 0");
+for (const [name, definition] of [["attachments", "TEXT NOT NULL DEFAULT '[]'"], ["reply_to", "TEXT"], ["boost_count", "INTEGER NOT NULL DEFAULT 0"]]) if (!db.prepare("SELECT 1 FROM pragma_table_info('social_posts') WHERE name=?").get(name)) db.exec(`ALTER TABLE social_posts ADD COLUMN ${name} ${definition}`);
 for (const [name, definition] of [["kind", "TEXT NOT NULL DEFAULT 'user'"], ["metadata", "TEXT NOT NULL DEFAULT '{}'" ]]) {
   if (!db.prepare("SELECT 1 FROM pragma_table_info('direct_messages') WHERE name=?").get(name))
     db.exec(`ALTER TABLE direct_messages ADD COLUMN ${name} ${definition}`);
@@ -322,6 +326,9 @@ export function createMessage({ channelId, authorId, authorName, body, attachmen
     reply_to: replyTo,
   };
 }
+export function editMessage(id, authorId, body) { const now = new Date().toISOString(); const changed = db.prepare("UPDATE messages SET body=?,edited_at=? WHERE id=? AND author_id=? AND deleted_at IS NULL").run(encryptMessageValue(body), now, id, authorId).changes; return changed ? db.prepare("SELECT * FROM messages WHERE id=?").get(id) : null; }
+export function deleteMessage(id, authorId) { const now = new Date().toISOString(); const changed = db.prepare("UPDATE messages SET body='',deleted_at=? WHERE id=? AND author_id=? AND deleted_at IS NULL").run(now, id, authorId).changes; return changed > 0; }
+export function findMessage(id) { return db.prepare("SELECT id,channel_id FROM messages WHERE id=?").get(id); }
 
 export function countUsers() {
   return db.prepare("SELECT COUNT(*) AS count FROM users WHERE id<>'00000000-0000-4000-8000-000000000001'").get().count;
@@ -369,7 +376,7 @@ export function findUserByUsername(username) {
     .get(username);
 }
 export function listFriends(userId) {
-  return db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,
+  return db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,u.server_tag,u.server_tag_emoji,
     COALESCE(json_extract(u.settings,'$.statusText'),'') AS status_text,
     COALESCE(json_extract(u.settings,'$.selectedUsernameStyleIds'),'[]') AS username_style_ids
     FROM users u JOIN friend_requests f ON f.status='accepted' AND ((f.from_user=? AND f.to_user=u.id) OR (f.to_user=? AND f.from_user=u.id))`).all(userId, userId);
@@ -388,7 +395,7 @@ export function removeFriend(userId, otherId) { return db.prepare("DELETE FROM f
 export function findPublicUser(id) {
   return db
     .prepare(
-      "SELECT id,username,display_name,avatar_url,banner_url,bio,accent_color,profile_css,role,settings,created_at,dm_public_key FROM users WHERE id=?",
+      "SELECT id,username,display_name,avatar_url,banner_url,bio,accent_color,server_tag,server_tag_emoji,profile_css,role,settings,created_at,dm_public_key FROM users WHERE id=?",
     )
     .get(id);
 }
@@ -423,11 +430,13 @@ export function updateProfile(
     bio,
     accentColor,
     profileCss,
+    serverTag = "",
+    serverTagEmoji = "",
     settings,
   },
 ) {
   db.prepare(
-    "UPDATE users SET username=?,display_name=?,avatar_url=?,banner_url=?,bio=?,accent_color=?,profile_css=?,settings=? WHERE id=?",
+    "UPDATE users SET username=?,display_name=?,avatar_url=?,banner_url=?,bio=?,accent_color=?,profile_css=?,server_tag=?,server_tag_emoji=?,settings=? WHERE id=?",
   ).run(
     username,
     displayName,
@@ -436,12 +445,14 @@ export function updateProfile(
     bio,
     accentColor,
     profileCss,
+    serverTag,
+    serverTagEmoji,
     JSON.stringify(settings),
     id,
   );
   return db
     .prepare(
-      "SELECT id,email,username,display_name,avatar_url,banner_url,bio,accent_color,profile_css,role,created_at,settings FROM users WHERE id=?",
+      "SELECT id,email,username,display_name,avatar_url,banner_url,bio,accent_color,server_tag,server_tag_emoji,profile_css,role,created_at,settings FROM users WHERE id=?",
     )
     .get(id);
 }
@@ -980,23 +991,25 @@ export function deleteInstanceEmoji(id, guildId = undefined) {
 export function listSocialPosts() {
   return db
     .prepare(
-      `SELECT p.id,p.body,p.created_at,u.id AS author_id,u.username,u.display_name,u.avatar_url,u.accent_color
+      `SELECT p.id,p.body,p.created_at,p.attachments,p.reply_to,p.boost_count,u.id AS author_id,u.username,u.display_name,u.avatar_url,u.accent_color
       FROM social_posts p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC LIMIT 100`,
     )
-    .all();
+    .all().map((post) => ({ ...post, attachments: JSON.parse(post.attachments || "[]") }));
 }
-export function createSocialPost({ id, userId, body }) {
+export function createSocialPost({ id, userId, body, attachments = [], replyTo = null }) {
   const createdAt = new Date().toISOString();
   db.prepare(
-    "INSERT INTO social_posts(id,user_id,body,created_at) VALUES(?,?,?,?)",
-  ).run(id, userId, body, createdAt);
-  return db
+    "INSERT INTO social_posts(id,user_id,body,created_at,attachments,reply_to) VALUES(?,?,?,?,?,?)",
+  ).run(id, userId, body, createdAt, JSON.stringify(attachments), replyTo);
+  const post = db
     .prepare(
-      `SELECT p.id,p.body,p.created_at,u.id AS author_id,u.username,u.display_name,u.avatar_url,u.accent_color
+      `SELECT p.id,p.body,p.created_at,p.attachments,p.reply_to,p.boost_count,u.id AS author_id,u.username,u.display_name,u.avatar_url,u.accent_color
     FROM social_posts p JOIN users u ON u.id=p.user_id WHERE p.id=?`,
     )
     .get(id);
+  return post ? { ...post, attachments: JSON.parse(post.attachments || "[]") } : post;
 }
+export function boostSocialPost(id) { return db.prepare("UPDATE social_posts SET boost_count=boost_count+1 WHERE id=?").run(id).changes > 0; }
 const builtInDecorations = [
   [
     "kawaii-cat-frame",
