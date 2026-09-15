@@ -308,11 +308,15 @@ export async function createRemoteJoin(user, address) {
   const communityGlobalId = snapshot.global_id || `${snapshot.id}#${destination.toLowerCase()}`;
   const publicOrigin = String(process.env.PUBLIC_URL || `http://${federationDomain()}`).replace(/\/$/, "");
   const portableAsset = (value) => value ? new URL(value, `${publicOrigin}/`).href : "";
+  const identity = findPublicUser(user.id);
+  let identitySettings = {};
+  try { identitySettings = typeof identity?.settings === "string" ? JSON.parse(identity.settings || "{}") : (identity?.settings || {}); } catch { identitySettings = {}; }
   saveRemoteMembership(communityGlobalId, globalUserId, "pending", []);
   return queueFederationEvent({ peer, type: "membership.join.request", entityId: `${communityGlobalId}:${globalUserId}`,
     payload: { community_id: snapshot.id, community_address: address, identity: {
       id: user.id, username: user.username, display_name: user.display_name, avatar_url: portableAsset(user.avatar_url),
-      banner_url: portableAsset(user.banner_url), dm_public_key: findPublicUser(user.id)?.dm_public_key || "",
+      banner_url: portableAsset(user.banner_url), dm_public_key: identity?.dm_public_key || "",
+      profile: { bio: identity?.bio || "", accent_color: identity?.accent_color || "#7857ff", server_tag: identity?.server_tag || "", server_tag_emoji: identity?.server_tag_emoji || "", profile_background: identitySettings.profileBackground || "#21152c", profile_background_image: identitySettings.profileBackgroundImage || "" },
     } } });
 }
 

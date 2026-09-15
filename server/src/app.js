@@ -437,7 +437,8 @@ export function createApp() {
         for (const peer of listPeers().filter((item) => item.status === "allowed"))
           void queueFederationEvent({ peer, type: "identity.upsert", entityId: `${identity.id}#${federationDomain()}`,
             payload: { id: identity.id, username: identity.username, display_name: identity.display_name,
-              avatar_url: federatedAssetUrl(identity.avatar_url), banner_url: federatedAssetUrl(identity.banner_url), dm_public_key: identity.dm_public_key } }).catch(() => {});
+              avatar_url: federatedAssetUrl(identity.avatar_url), banner_url: federatedAssetUrl(identity.banner_url),
+              dm_public_key: identity.dm_public_key, profile: publicProfile(identity) } }).catch(() => {});
       }
     });
     next();
@@ -520,13 +521,71 @@ export function createApp() {
     endSession(req, res);
     res.status(204).end();
   });
-  app.get("/api/users/:id/profile", requireUser, (req, res) => {
-    const profile = publicProfile(findPublicUser(req.params.id));
-    if (profile && req.query.guildId)
-      profile.roles = listUserGuildRoles(req.query.guildId, req.params.id);
-    return profile
-      ? res.json({ profile })
-      : res.status(404).json({ error: "User not found" });
+  app.get("/api/users/:id/profile", requireUser, async (req, res) => {
+    const local = findPublicUser(req.params.id);
+    if (local) {
+      const profile = publicProfile(local);
+      if (req.query.guildId) profile.roles = listUserGuildRoles(req.query.guildId, req.params.id);
+      return res.json({ profile });
+    }
+
+    // A remote member is addressed by its portable ID (user-id#instance), or
+    // by its source UUID together with a remote guildId. Resolve the profile
+    // from the owning instance and preserve absolute media URLs.
+    const requestedId = String(req.params.id || "");
+    const remoteCommunity = req.query.guildId ? remoteCommunityFor(req.user.id, req.query.guildId) : null;
+    const separator = requestedId.lastIndexOf("#");
+    const remoteUserId = separator > 0 ? requestedId.slice(0, separator) : requestedId;
+    const remoteOrigin = separator > 0 ? requestedId.slice(separator + 1) : remoteCommunity?.origin;
+    if (!remoteOrigin || !remoteCommunity && separator < 1) return res.status(404).json({ error: "User not found" });
+
+    let identity = findRemoteIdentity(`${remoteUserId}#${remoteOrigin}`);
+    if (!identity) {
+      try {
+        const peer = findPeerByDomain(remoteOrigin);
+        if (peer?.status !== "allowed") return res.status(404).json({ error: "User not found" });
+        const response = await federationFetch(peer, `/api/v1/federation/identities/${encodeURIComponent(remoteUserId)}`, { headers: { accept: "application/json" } });
+        if (response.ok) identity = (await response.json()).identity || null;
+      } catch {
+        identity = null;
+      }
+    }
+    if (!identity) return res.status(404).json({ error: "User not found" });
+    const profileSource = identity.profile && typeof identity.profile === "object" ? identity.profile : identity;
+    const remoteBase = findPeerByDomain(remoteOrigin)?.base_url || `https://${remoteOrigin}`;
+    const remoteAsset = (value) => {
+      if (!value) return "";
+      try { return new URL(value, `${String(remoteBase).replace(/\/$/, "")}/`).href; } catch { return value; }
+    };
+    const profile = {
+      id: `${remoteUserId}#${remoteOrigin}`,
+      username: identity.username || remoteUserId,
+      handle: `${identity.username || remoteUserId}@${remoteOrigin}`,
+      home_server: remoteOrigin,
+      display_name: identity.display_name || identity.username || remoteUserId,
+      avatar_url: remoteAsset(identity.avatar_url),
+      banner_url: remoteAsset(identity.banner_url),
+      bio: profileSource.bio || "",
+      accent_color: profileSource.accent_color || "#7857ff",
+      server_tag: profileSource.server_tag || "",
+      server_tag_emoji: profileSource.server_tag_emoji || "",
+      profile_css: profileSource.profile_css || "",
+      role: "remote",
+      status: profileSource.status || "online",
+      status_text: profileSource.status_text || profileSource.statusText || "",
+      decoration_id: profileSource.decoration_id || profileSource.selectedDecorationId || "",
+      profile_theme_id: profileSource.profile_theme_id || profileSource.selectedProfileThemeId || "",
+      server_tags: profileSource.server_tags || profileSource.serverTags || {},
+      server_tag_selection: profileSource.server_tag_selection || profileSource.serverTag || null,
+      profile_background: profileSource.profile_background || profileSource.profileBackground || "#21152c",
+      profile_background_image: profileSource.profile_background_image || profileSource.profileBackgroundImage || "",
+      created_at: identity.created_at || null,
+    };
+    if (remoteCommunity && Array.isArray(remoteCommunity.state?.remote_members)) {
+      const member = remoteCommunity.state.remote_members.find((item) => String(item.global_id) === profile.id);
+      profile.roles = (member?.roles || []).map((roleId) => (remoteCommunity.state.roles || []).find((role) => String(role.id) === String(roleId))).filter(Boolean);
+    }
+    return res.json({ profile });
   });
   app.put("/api/users/me", requireUser, (req, res) => {
     const username = String(req.body?.username || "")
@@ -838,8 +897,14 @@ export function createApp() {
   });
   app.get("/api/v1/federation/identities/:id", (req, res) => {
     const identity = findPublicUser(req.params.id);
-    return identity ? res.json({ identity: { ...publicProfile(identity), dm_public_key: identity.dm_public_key || "" } }) :
-      res.status(404).json({ error: "Identity not found" });
+    if (!identity) return res.status(404).json({ error: "Identity not found" });
+    const profile = publicProfile(identity);
+    return res.json({ identity: {
+      ...profile,
+      avatar_url: federatedAssetUrl(profile.avatar_url),
+      banner_url: federatedAssetUrl(profile.banner_url),
+      dm_public_key: identity.dm_public_key || "",
+    } });
   });
   app.get("/api/v1/federation/memberships", requireUser, (req, res) =>
     res.json({ communities: listRemoteCommunitiesForUser(`${req.user.id}#${federationDomain()}`) }));
@@ -970,13 +1035,31 @@ export function createApp() {
       ? res.status(204).end()
       : res.status(404).json({ error: "Collection item not found" }),
   );
-  app.get("/api/v1/emojis", (req, res) =>
-    res.json({
+  app.get("/api/v1/emojis", async (req, res) => {
+    const viewer = getUser(req);
+    const remote = viewer && req.query.guildId ? remoteCommunityFor(viewer.id, req.query.guildId) : null;
+    if (remote) {
+      let guildEmojis = remote.state?.guild_emojis || [];
+      // Older snapshots did not contain emoji metadata. Fetch it from the
+      // owner so existing federated memberships do not need to be recreated.
+      if (!guildEmojis.length) {
+        try {
+          const peer = findPeerByDomain(remote.origin);
+          const response = peer && await federationFetch(peer, `/api/v1/emojis?guildId=${encodeURIComponent(remote.remote_id)}`, { headers: { accept: "application/json" } });
+          if (response?.ok) {
+            const payload = await response.json();
+            guildEmojis = (payload.guild_emojis || []).map((emoji) => ({ ...emoji, url: emoji.url ? new URL(emoji.url, peer.base_url).href : emoji.url }));
+          }
+        } catch { /* stale peer or empty emoji set */ }
+      }
+      return res.json({ emojis: listInstanceEmojis(), guild_emojis: guildEmojis, instance: getInstanceSettings().name });
+    }
+    return res.json({
       emojis: listInstanceEmojis(),
       guild_emojis: req.query.guildId ? listGuildEmojis(req.query.guildId) : [],
       instance: getInstanceSettings().name,
-    }),
-  );
+    });
+  });
   app.post("/api/v1/admin/emojis", requireAdmin, (req, res) => {
     if (req.user.role !== "owner")
       return res.status(403).json({ error: "Instance owner access required" });
@@ -1503,6 +1586,11 @@ export function createApp() {
   app.get("/api/v1/guilds/:id/members", requireUser, (req, res) => {
     const remote = remoteCommunityFor(req.user.id, req.params.id);
     if (remote) {
+      const remoteBase = findPeerByDomain(remote.origin)?.base_url || `https://${remote.origin}`;
+      const remoteAsset = (value) => {
+        if (!value) return "";
+        try { return new URL(value, `${String(remoteBase).replace(/\/$/, "")}/`).href; } catch { return value; }
+      };
       const members = (remote.state?.remote_members || []).map((member) => {
         const identity = findRemoteIdentity(member.global_id);
         return {
@@ -1510,8 +1598,8 @@ export function createApp() {
           user_id: member.global_id,
           username: identity?.username || member.global_id,
           display_name: identity?.display_name || identity?.username || member.global_id,
-          avatar_url: identity?.avatar_url || "",
-          banner_url: identity?.banner_url || "",
+          avatar_url: remoteAsset(identity?.avatar_url),
+          banner_url: remoteAsset(identity?.banner_url),
           remote: true,
           roles: member.roles || [],
         };

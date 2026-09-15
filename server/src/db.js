@@ -1649,7 +1649,11 @@ export function communityFederationSnapshot(guildId, domain) {
     id: community.id, global_id: `${community.id}#${domain}`, address: `${community.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")}#${domain}`,
     name: community.name, description: community.description, icon_url: asset(community.icon_asset_id), banner_url: asset(community.banner_asset_id),
     profile, channels: listCommunityChannels(guildId), categories: listCategories(guildId),
-    roles: listGuildRoles(guildId), permission_overrides: listPermissionOverrides(guildId),
+    roles: listGuildRoles(guildId),
+    // Custom emoji metadata travels with the community snapshot. URLs are
+    // absolute so a federated client can load the asset from its owner.
+    guild_emojis: listGuildEmojis(guildId).map((emoji) => ({ ...emoji, url: `${origin}/api/v1/assets/${emoji.asset_id}` })),
+    permission_overrides: listPermissionOverrides(guildId),
     members: db.prepare("SELECT guild_id,user_id,nickname,joined_at FROM guild_members WHERE guild_id=?").all(guildId),
     member_roles: db.prepare("SELECT guild_id,user_id,role_id FROM member_roles WHERE guild_id=?").all(guildId),
     remote_members: db.prepare("SELECT user_global_id AS global_id,status,roles,joined_at FROM remote_memberships WHERE community_global_id=?").all(`${guildId}#${domain}`).map((m) => ({ ...m, roles: JSON.parse(m.roles || "[]") })),

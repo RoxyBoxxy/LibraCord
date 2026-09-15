@@ -43,7 +43,11 @@ import {
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
 function normalizeApiPath(value) {
-  return String(value || "").replace(/(\/api\/v1\/guilds\/[^\/?#]+)#([^\/?#]+)/g, "$1%23$2");
+  return String(value || "")
+    .replace(/(\/api\/v1\/guilds\/[^\/?#]+)#([^\/?#]+)/g, "$1%23$2")
+    // Federation IDs use `name#instance`. In query strings an unescaped `#`
+    // becomes the URL fragment, so encode it before fetch/navigation occurs.
+    .replace(/([?&][^#=&]+=[^#&]*)#([^#&]+)/g, "$1%23$2");
 }
 const configuredServer = new URLSearchParams(window.location.search).get("server"),
   serverOrigin = configuredServer ? configuredServer.replace(/\/$/, "") : "",
@@ -2092,7 +2096,10 @@ async function chooseGuild(guild) {
     guildMembers.value = [];
     guildRoles.value = guild.roles || [];
     guildCategories.value = guild.categories || [];
-    guildEmojis.value = [];
+    guildEmojis.value = guild.guild_emojis || (await api(`/api/v1/emojis?guildId=${encodeURIComponent(guild.id)}`)).guild_emojis || [];
+    federatedGuildEmojis.value = [
+      ...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values(),
+    ];
     const firstRemoteChannel = guild.channels?.find((channel) => channel.kind === "text") || guild.channels?.find((channel) => channel.kind === "voice");
     if (firstRemoteChannel) await selectChannel(firstRemoteChannel);
     return;
@@ -2904,7 +2911,7 @@ async function openProfile(id, mode = "compact") {
       ? `?guildId=${encodeURIComponent(activeCommunity.value.id)}`
       : "";
     activeProfile.value = (
-      await api(`/api/users/${id}/profile${guildId}`)
+      await api(`/api/users/${encodeURIComponent(id)}/profile${guildId}`)
     ).profile;
     activeProfileMode.value = mode;
     userMenu.value = null;
