@@ -76,7 +76,15 @@ export function canonicalJson(value) {
 
 export function federationIdentity() {
   let identity = getFederationIdentityRecord();
-  if (identity) return identity;
+  if (identity) {
+    // Detect a partially restored/corrupted identity row where the stored
+    // public and private keys no longer form a pair. Regenerate once so every
+    // new envelope can be verified by peers through discovery.
+    try {
+      const probe = Buffer.from("libracord-federation-key-check");
+      if (verify(null, probe, identity.public_key, sign(null, probe, identity.private_key))) return identity;
+    } catch { /* regenerate below */ }
+  }
   const pair = generateKeyPairSync("ed25519");
   const publicKey = pair.publicKey.export({ type: "spki", format: "pem" });
   const privateKey = pair.privateKey.export({ type: "pkcs8", format: "pem" });
@@ -149,8 +157,19 @@ export async function verifyEnvelope(envelope, { consumeRate = true } = {}) {
     const error = new Error("Peer rate limit exceeded"); error.status = 429; throw error;
   }
   try {
-    const publicKey = await peerKey(peer, envelope);
-    const valid = verify(null, Buffer.from(canonicalJson(unsignedEnvelope(envelope))), publicKey, Buffer.from(envelope.signature, "base64url"));
+    const signedBytes = Buffer.from(canonicalJson(unsignedEnvelope(envelope)));
+    let publicKey = await peerKey(peer, envelope);
+    let valid = verify(null, signedBytes, publicKey, Buffer.from(envelope.signature, "base64url"));
+    // A peer may have cached an older key under the same configured peer
+    // record. Refresh discovery once before rejecting the envelope; this also
+    // makes key rotation converge without manual database edits.
+    if (!valid && peer.signing_public_key) {
+      const discovery = await discoverFederationPeer(peer);
+      if (discovery.domain === envelope.origin && discovery.signing_key?.key_id === envelope.key_id) {
+        publicKey = discovery.signing_key.public_key;
+        valid = verify(null, signedBytes, publicKey, Buffer.from(envelope.signature, "base64url"));
+      }
+    }
     if (!valid) throw new Error("Invalid federation signature");
     recordPeerVerification(peer.id, true);
     return peer;
