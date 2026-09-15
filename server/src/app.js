@@ -369,7 +369,7 @@ export function createApp() {
     const envelope = signEnvelope({
       destination: match.remote.origin,
       type: "channel.request",
-      entityId: `${match.remote.global_id}:${channelId}`,
+      entity_id: `${match.remote.global_id}:${channelId}`,
       payload: {
         action,
         community_id: match.remote.remote_id,
@@ -395,7 +395,7 @@ export function createApp() {
     const envelope = signEnvelope({
       destination: match.remote.origin,
       type: "voice.request",
-      entityId: `${match.remote.global_id}:${channelId || communityId}`,
+      entity_id: `${match.remote.global_id}:${channelId || communityId}`,
       payload: {
         action,
         community_id: match.remote.remote_id,
