@@ -714,9 +714,9 @@ async function beginSession(nextUser) {
     guildRoles.value = activeSessionGuild.roles || [];
     guildCategories.value = activeSessionGuild.categories || [];
   } else {
-    if (activeCommunityId.value) guildMembers.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/members`)).members;
-    if (activeCommunityId.value) guildRoles.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/roles`)).roles;
-    if (activeCommunityId.value) guildCategories.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/categories`)).categories;
+    if (activeCommunityId.value) guildMembers.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/members`)).members;
+    if (activeCommunityId.value) guildRoles.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/roles`)).roles;
+    if (activeCommunityId.value) guildCategories.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/categories`)).categories;
   }
   if (savedNavigation?.page === "home") {
     await openHome(savedNavigation.homeTab || "feed");
@@ -1176,7 +1176,7 @@ async function uploadGuildEmoji() {
     form.append("name", guildEmojiName.value);
     form.append("image", guildEmojiFile.value);
     const response = await fetch(
-      apiEndpoint(`/api/v1/guilds/${activeCommunity.value.id}/emojis`),
+      apiEndpoint(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/emojis`),
       { method: "POST", credentials: "include", body: form },
     );
     const result = await response.json();
@@ -1191,7 +1191,7 @@ async function uploadGuildEmoji() {
   }
 }
 async function removeGuildEmoji(emoji) {
-  await api(`/api/v1/guilds/${activeCommunity.value.id}/emojis/${emoji.id}`, {
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/emojis/${encodeURIComponent(emoji.id)}`, {
     method: "DELETE",
   });
   guildEmojis.value = guildEmojis.value.filter((item) => item.id !== emoji.id);
@@ -1461,7 +1461,7 @@ async function toggleMemberRole(role) {
   const ids = new Set((member?.roles || []).map((item) => item.id));
   ids.has(role.id) ? ids.delete(role.id) : ids.add(role.id);
   try {
-    const result = await api(`/api/v1/guilds/${activeCommunity.value.id}/members/${targetId}/roles`, { method: "PUT", body: JSON.stringify({ roleIds: [...ids] }) });
+    const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/members/${encodeURIComponent(targetId)}/roles`, { method: "PUT", body: JSON.stringify({ roleIds: [...ids] }) });
     if (member) member.roles = (guildRoles.value || []).filter((item) => result.role_ids.includes(item.id));
     emitCommunityChanged(activeCommunity.value.id);
     userMenu.value = null;
@@ -2029,7 +2029,7 @@ async function createGuild() {
     communities.value.push(result.guild);
     activeCommunityId.value = result.guild.id;
     guildMembers.value = (
-      await api(`/api/v1/guilds/${result.guild.id}/members`)
+    await api(`/api/v1/guilds/${encodeURIComponent(result.guild.id)}/members`)
     ).members;
     guildDialog.value = false;
     guildWizardStep.value = "choose";
@@ -2094,12 +2094,12 @@ async function chooseGuild(guild) {
     return;
   }
   guildMembers.value = (
-    await api(`/api/v1/guilds/${guild.id}/members`)
+    await api(`/api/v1/guilds/${encodeURIComponent(guild.id)}/members`)
   ).members;
-  guildRoles.value = (await api(`/api/v1/guilds/${guild.id}/roles`)).roles;
-  guildCategories.value = (await api(`/api/v1/guilds/${guild.id}/categories`)).categories;
+  guildRoles.value = (await api(`/api/v1/guilds/${encodeURIComponent(guild.id)}/roles`)).roles;
+  guildCategories.value = (await api(`/api/v1/guilds/${encodeURIComponent(guild.id)}/categories`)).categories;
   guildEmojis.value = (
-    await api(`/api/v1/emojis?guildId=${guild.id}`)
+    await api(`/api/v1/emojis?guildId=${encodeURIComponent(guild.id)}`)
   ).guild_emojis;
   federatedGuildEmojis.value = [
     ...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values(),
@@ -2231,7 +2231,7 @@ async function joinRemoteCommunity(guild) {
 }
 async function removeCommunityMember(member) {
   if (!confirm(`Remove ${member.display_name} from this community?`)) return;
-  await api(`/api/v1/guilds/${activeCommunityId.value}/members/${member.id}`, {
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/members/${encodeURIComponent(member.id)}`, {
     method: "DELETE",
   });
   guildMembers.value = guildMembers.value.filter((entry) => entry.id !== member.id);
@@ -2405,14 +2405,14 @@ async function openChannelSettings(
   channelMenu.value = null;
   saved.value = "";
   const [roles, invites, webhooks] = await Promise.all([
-    api(`/api/v1/guilds/${activeCommunity.value.id}/roles`),
-    api(`/api/v1/guilds/${activeCommunity.value.id}/invites`),
-    api(`/api/v1/guilds/${activeCommunity.value.id}/webhooks`),
+    api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/roles`),
+    api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/invites`),
+    api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/webhooks`),
   ]);
   guildRoles.value = roles.roles;
   guildInvites.value = invites.invites;
   guildWebhooks.value = webhooks.webhooks;
-  channelPermissionOverrides.value = (await api(`/api/v1/guilds/${activeCommunity.value.id}/permission-overrides`)).overrides || [];
+  channelPermissionOverrides.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/permission-overrides`)).overrides || [];
   channelPermissionTarget.value = guildRoles.value.find((role) => role.managed)?.id || "everyone";
 }
 const channelPermissionRules = [
@@ -2439,7 +2439,7 @@ async function cyclePermission(rule) {
   allow &= ~rule.bit; deny &= ~rule.bit;
   if (next === "allow") allow |= rule.bit; if (next === "deny") deny |= rule.bit;
   const id = `${channelSettingsForm.value.id}:${channelPermissionTarget.value}`;
-  const result = await api(`/api/v1/guilds/${activeCommunity.value.id}/permission-overrides/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ channelId: channelSettingsForm.value.id, targetType: "role", targetId: channelPermissionTarget.value, allowMask: allow.toString(), denyMask: deny.toString() }) });
+  const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/permission-overrides/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ channelId: channelSettingsForm.value.id, targetType: "role", targetId: channelPermissionTarget.value, allowMask: allow.toString(), denyMask: deny.toString() }) });
   const index = channelPermissionOverrides.value.findIndex((item) => item.id === result.override.id);
   if (index >= 0) channelPermissionOverrides.value[index] = result.override; else channelPermissionOverrides.value.push(result.override);
   emitCommunityChanged(activeCommunity.value?.id);
@@ -2473,7 +2473,7 @@ async function saveChannelSettings() {
 async function duplicateChannel() {
   const source = channelMenu.value.channel;
   const result = await api(
-    `/api/v1/guilds/${activeCommunity.value.id}/channels`,
+    `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels`,
     {
       method: "POST",
       body: JSON.stringify({ name: `${source.name}-copy`, kind: source.kind }),
@@ -2580,11 +2580,11 @@ async function openGuildSettings(tab = "overview") {
   try {
     const [roles, invites, categories, members, webhooks, emojis] =
       await Promise.all([
-        api(`/api/v1/guilds/${id}/roles`),
-        api(`/api/v1/guilds/${id}/invites`),
-        api(`/api/v1/guilds/${id}/categories`),
-        api(`/api/v1/guilds/${id}/members`),
-        api(`/api/v1/guilds/${id}/webhooks`),
+        api(`/api/v1/guilds/${encodeURIComponent(id)}/roles`),
+        api(`/api/v1/guilds/${encodeURIComponent(id)}/invites`),
+        api(`/api/v1/guilds/${encodeURIComponent(id)}/categories`),
+        api(`/api/v1/guilds/${encodeURIComponent(id)}/members`),
+        api(`/api/v1/guilds/${encodeURIComponent(id)}/webhooks`),
         api(`/api/v1/emojis?guildId=${id}`),
       ]);
     guildRoles.value = roles.roles;
@@ -2604,7 +2604,7 @@ async function addRole() {
   const permissions = roleForm.value.permissions
     .reduce((mask, value) => mask | BigInt(value), 0n)
     .toString();
-  const result = await api(`/api/v1/guilds/${activeCommunity.value.id}/roles`, {
+  const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/roles`, {
     method: "POST",
     body: JSON.stringify({ ...roleForm.value, permissions }),
   });
@@ -2632,7 +2632,7 @@ function toggleRolePermission(value) {
 async function saveRole() {
   if (selectedRole.value.managed) return;
   const result = await api(
-    `/api/v1/guilds/${activeCommunity.value.id}/roles/${selectedRole.value.id}`,
+    `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/roles/${encodeURIComponent(selectedRole.value.id)}`,
     { method: "PATCH", body: JSON.stringify(selectedRole.value) },
   );
   const index = guildRoles.value.findIndex(
@@ -2645,7 +2645,7 @@ async function saveRole() {
 }
 async function addInvite() {
   const result = await api(
-    `/api/v1/guilds/${activeCommunity.value.id}/invites`,
+    `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/invites`,
     { method: "POST", body: JSON.stringify(inviteForm.value) },
   );
   guildInvites.value.push(result.invite);
@@ -2653,7 +2653,7 @@ async function addInvite() {
 }
 async function addWebhook() {
   const result = await api(
-    `/api/v1/guilds/${activeCommunity.value.id}/webhooks`,
+    `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/webhooks`,
     { method: "POST", body: JSON.stringify(webhookForm.value) },
   );
   guildWebhooks.value.push(result.webhook);
@@ -2662,7 +2662,7 @@ async function addWebhook() {
 }
 async function addCategory() {
   const result = await api(
-    `/api/v1/guilds/${activeCommunity.value.id}/categories`,
+    `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/categories`,
     { method: "POST", body: JSON.stringify({ name: categoryName.value }) },
   );
   guildCategories.value.push(result.category);
@@ -2689,7 +2689,7 @@ async function moveChannel(channel, target) {
   const from = channels.findIndex((item) => item.id === channel.id), to = channels.findIndex((item) => item.id === target.id);
   if (from < 0 || to < 0) return;
   channels.splice(from, 1); channels.splice(to, 0, channel);
-  await api(`/api/v1/guilds/${activeCommunity.value.id}/channels/order`, {
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels/order`, {
     method: "PUT",
     body: JSON.stringify({ channels: channels.map((item) => ({ id: item.id, categoryId: item.category_id || null })) }),
   });
@@ -2703,7 +2703,7 @@ async function moveChannelToCategory(channel, categoryId = null) {
   channel.category_id = categoryId;
   try {
     const channels = [...activeCommunity.value.channels].sort((a, b) => (a.position || 0) - (b.position || 0));
-    await api(`/api/v1/guilds/${activeCommunity.value.id}/channels/order`, {
+    await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels/order`, {
       method: "PUT",
       body: JSON.stringify({ channels: channels.map((item) => ({ id: item.id, categoryId: item.category_id || null })) }),
     });
@@ -2715,7 +2715,7 @@ async function moveChannelToCategory(channel, categoryId = null) {
 }
 async function saveGuild() {
   try {
-    const result = await api(`/api/v1/guilds/${activeCommunity.value.id}`, {
+    const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}`, {
       method: "PATCH",
       body: JSON.stringify(guildForm.value),
     });
@@ -2732,7 +2732,7 @@ async function uploadCommunityBackground() {
   form.append("image", communityBackgroundFile.value);
   try {
     const response = await fetch(
-      apiEndpoint(`/api/v1/guilds/${activeCommunity.value.id}/background`),
+      apiEndpoint(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/background`),
       { method: "POST", credentials: "include", body: form },
     );
     const result = await response.json();
@@ -2753,7 +2753,7 @@ async function uploadCommunityMedia(kind, file) {
   const form = new FormData();
   form.append("image", file);
   try {
-    const response = await fetch(apiEndpoint(`/api/v1/guilds/${activeCommunity.value.id}/media/${kind}`), { method: "POST", credentials: "include", body: form });
+    const response = await fetch(apiEndpoint(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/media/${kind}`), { method: "POST", credentials: "include", body: form });
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || "Upload failed");
     Object.assign(activeCommunity.value, result.guild);
@@ -2768,7 +2768,7 @@ async function uploadCommunityMedia(kind, file) {
 async function addChannel() {
   try {
     const result = await api(
-      `/api/v1/guilds/${activeCommunity.value.id}/channels`,
+      `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels`,
       { method: "POST", body: JSON.stringify(channelForm.value) },
     );
     activeCommunity.value.channels.push(result.channel);
