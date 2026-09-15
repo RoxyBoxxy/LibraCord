@@ -351,7 +351,15 @@ export function createApp() {
   };
   const remoteCommunityFor = (userId, communityId) => {
     const globalUserId = `${userId}#${federationDomain()}`;
-    return listRemoteCommunitiesForUser(globalUserId).find((remote) => remote.status === "joined" && String(remote.global_id) === String(communityId)) || null;
+    const requested = String(communityId || "");
+    return listRemoteCommunitiesForUser(globalUserId).find((remote) => remote.status === "joined" && (
+      String(remote.global_id) === requested ||
+      // Older clients sent community IDs containing `#` without encoding it;
+      // the browser stripped the fragment before it reached this route. The
+      // remote UUID still lets us resolve the joined community safely.
+      String(remote.remote_id) === requested ||
+      String(remote.address) === requested
+    )) || null;
   };
   const requestRemoteChannel = async (req, channelId, action, input = {}) => {
     const match = remoteChannelFor(req.user.id, channelId);
@@ -750,8 +758,11 @@ export function createApp() {
     const community = findCommunityByReference(req.params.id);
     const snapshot = community ? communityFederationSnapshot(community.id, federationDomain()) : null;
     if (!snapshot) return res.status(404).json({ error: "Community not found" });
-    const { channels: _channels, categories: _categories, roles: _roles, permission_overrides: _overrides,
-      members: _members, member_roles: _memberRoles, remote_members: _remoteMembers, bans: _bans,
+    // Channel/category/role metadata is public community structure and must be
+    // included in the initial join response.  Omitting it leaves the joining
+    // instance with an empty remote guild until the next federation snapshot.
+    const { permission_overrides: _overrides, members: _members, member_roles: _memberRoles,
+      remote_members: _remoteMembers, bans: _bans,
       moderation_actions: _moderation, ...publicCommunity } = snapshot;
     return res.json({ community: publicCommunity });
   });
@@ -1489,17 +1500,36 @@ export function createApp() {
         ? res.status(204).end()
         : res.status(404).json({ error: "Channel not found" }),
   );
-  app.get("/api/v1/guilds/:id/members", requireUser, (req, res) =>
-    isGuildMember(req.params.id, req.user.id)
+  app.get("/api/v1/guilds/:id/members", requireUser, (req, res) => {
+    const remote = remoteCommunityFor(req.user.id, req.params.id);
+    if (remote) {
+      const members = (remote.state?.remote_members || []).map((member) => {
+        const identity = findRemoteIdentity(member.global_id);
+        return {
+          id: member.global_id,
+          user_id: member.global_id,
+          username: identity?.username || member.global_id,
+          display_name: identity?.display_name || identity?.username || member.global_id,
+          avatar_url: identity?.avatar_url || "",
+          banner_url: identity?.banner_url || "",
+          remote: true,
+          roles: member.roles || [],
+        };
+      });
+      return res.json({ members });
+    }
+    return isGuildMember(req.params.id, req.user.id)
       ? res.json({ members: listGuildMembers(req.params.id).map((member) => ({ ...member, roles: member.remote ? member.roles : listUserGuildRoles(req.params.id, member.id) })) })
-      : res.status(403).json({ error: "Join this community first" }),
-  );
+      : res.status(403).json({ error: "Join this community first" });
+  });
   app.delete("/api/v1/guilds/:id/members/@me", requireUser, (req, res) => removeGuildMember(req.params.id, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Membership not found" }));
-  app.get("/api/v1/guilds/:id/roles", requireUser, (req, res) =>
-    isGuildMember(req.params.id, req.user.id)
+  app.get("/api/v1/guilds/:id/roles", requireUser, (req, res) => {
+    const remote = remoteCommunityFor(req.user.id, req.params.id);
+    if (remote) return res.json({ roles: remote.state?.roles || [] });
+    return isGuildMember(req.params.id, req.user.id)
       ? res.json({ roles: listGuildRoles(req.params.id) })
-      : res.status(403).json({ error: "Join this community first" }),
-  );
+      : res.status(403).json({ error: "Join this community first" });
+  });
   app.post(
     "/api/v1/guilds/:id/roles",
     requireUser,
@@ -1620,11 +1650,13 @@ export function createApp() {
       });
     },
   );
-  app.get("/api/v1/guilds/:id/categories", requireUser, (req, res) =>
-    isGuildMember(req.params.id, req.user.id)
+  app.get("/api/v1/guilds/:id/categories", requireUser, (req, res) => {
+    const remote = remoteCommunityFor(req.user.id, req.params.id);
+    if (remote) return res.json({ categories: remote.state?.categories || [] });
+    return isGuildMember(req.params.id, req.user.id)
       ? res.json({ categories: listCategories(req.params.id) })
-      : res.status(403).json({ error: "Join this community first" }),
-  );
+      : res.status(403).json({ error: "Join this community first" });
+  });
   app.post(
     "/api/v1/guilds/:id/categories",
     requireUser,
