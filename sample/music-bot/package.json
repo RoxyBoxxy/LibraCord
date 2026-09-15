@@ -1,0 +1,6 @@
+{
+  "name": "libracord-sample-music-bot",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node index.js" }
+}

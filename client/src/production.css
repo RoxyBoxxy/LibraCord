@@ -1,0 +1,130 @@
+/* Final production UI pass. This file is loaded after feature styles so the
+   shared rhythm stays consistent across chat, home, admin, and settings. */
+:root {
+  --lc-control-height: 40px;
+  --lc-control-radius: 10px;
+  --lc-content-gutter: clamp(12px, 2vw, 24px);
+}
+
+html, body, #app { min-width: 0; width: 100%; height: 100%; }
+body { line-height: 1.4; text-rendering: optimizeLegibility; -webkit-font-smoothing: antialiased; }
+button, a, input, textarea, select { -webkit-tap-highlight-color: transparent; }
+button, [role="button"], a { cursor: pointer; }
+button:disabled, [aria-disabled="true"] { cursor: not-allowed; }
+
+.libracord-canvas { min-width: 0; min-height: 0; isolation: isolate; }
+.servers, .channels, .chat, .member-list, .home-hub, .admin { min-width: 0; min-height: 0; }
+.channels, .chat, .member-list, .home-hub, .admin { overflow: hidden; }
+.chat > section, .home-hub > section, .admin > section { min-width: 0; min-height: 0; }
+.channels > header { flex: 0 0 auto; }
+.channel-list-scroll { min-width: 0; min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; -webkit-overflow-scrolling: touch; touch-action: pan-y; padding-bottom: 72px; }
+.channel-list-scroll > .channel-category-group { min-width: 0; }
+.channels > section:not(.channel-list-scroll) { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
+.messages, .dm-messages, .member-list, .home-body, .admin-body { overscroll-behavior: contain; scrollbar-gutter: stable; }
+
+/* Inputs use one predictable control height everywhere except multiline fields. */
+.settings-content input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+.settings-content select,
+.settings-content textarea,
+.admin input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+.admin select,
+.admin textarea,
+.home-hub input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+.home-hub select,
+.home-hub textarea,
+.dialog-card input:not([type="checkbox"]):not([type="range"]):not([type="color"]),
+.dialog-card select,
+.dialog-card textarea,
+.peer-form input,
+.peer-form select {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-height: var(--lc-control-height);
+  padding: 9px 12px;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-control-radius);
+  background: color-mix(in srgb, var(--lc-raised) 88%, #000 12%);
+  color: var(--lc-text);
+  line-height: 1.35;
+  transition: border-color .15s ease, box-shadow .15s ease, background .15s ease;
+}
+.settings-content textarea, .admin textarea, .home-hub textarea, .dialog-card textarea { min-height: 104px; resize: vertical; }
+.settings-content input:hover, .settings-content select:hover, .settings-content textarea:hover,
+.admin input:hover, .admin select:hover, .admin textarea:hover,
+.home-hub input:hover, .home-hub select:hover, .home-hub textarea:hover,
+.dialog-card input:hover, .dialog-card select:hover, .dialog-card textarea:hover { border-color: var(--lc-border-strong); background: var(--lc-hover); }
+.settings-content input:focus, .settings-content select:focus, .settings-content textarea:focus,
+.admin input:focus, .admin select:focus, .admin textarea:focus,
+.home-hub input:focus, .home-hub select:focus, .home-hub textarea:focus,
+.dialog-card input:focus, .dialog-card select:focus, .dialog-card textarea:focus { border-color: var(--lc-accent-light); background: var(--lc-raised); box-shadow: var(--lc-focus); outline: 0; }
+input[type="checkbox"], input[type="radio"], input[type="range"], input[type="color"], input[type="file"] { min-height: 0; width: auto; padding: 0; }
+
+/* Consistent page gutters and card surfaces. */
+.home-hub > header, .admin > header { padding-inline: var(--lc-content-gutter); }
+.home-body, .admin-body { width: 100%; max-width: 1320px; margin-inline: auto; padding-inline: var(--lc-content-gutter); }
+.home-hub article, .admin article, .creation-grid article, .discovery-grid article, .publish-card, .pulse-card, .friend-row {
+  border-radius: 14px;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease, box-shadow .15s ease;
+}
+.creation-grid article:hover, .discovery-grid article:hover, .publish-card:hover, .pulse-card:hover, .friend-row:hover { border-color: var(--lc-border-strong); box-shadow: 0 14px 30px rgba(0,0,0,.16); }
+.discovery-grid article:hover, .creation-grid article:hover { transform: translateY(-1px); }
+.empty { max-width: 52ch; margin: 32px auto; padding: 24px; color: var(--lc-muted); text-align: center; }
+
+/* Chat surfaces and message rhythm. */
+.chat > header { flex: 0 0 auto; min-width: 0; }
+.text-channel-heading { min-width: 0; }
+.text-channel-heading strong, .text-channel-heading small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.messages article { min-width: 0; }
+.messages article > div:last-child { min-width: 0; }
+.messages p, .message-body, .message-attachment-name { overflow-wrap: anywhere; }
+.chat form.message-composer, .dm-composer, .voice-chat-composer, .shared-media-source {
+  box-sizing: border-box;
+  max-width: calc(100% - 24px);
+  border-radius: 12px;
+}
+.message-composer input, .dm-composer input, .voice-chat-composer input, .shared-media-source input { min-width: 0; width: auto; }
+.message-composer input::placeholder, .dm-composer input::placeholder, .voice-chat-composer input::placeholder, .shared-media-source input::placeholder { color: var(--lc-muted); opacity: 1; }
+.message-composer button, .dm-composer button, .voice-chat-composer button, .shared-media-source button { flex: 0 0 auto; }
+
+/* Overlays should never create a second horizontal scrollbar. */
+.dialog-layer, .profile-popout-layer, .image-crop-modal, .dm-call-modal { overflow: auto; overscroll-behavior: contain; }
+.dialog-card { box-sizing: border-box; width: min(720px, calc(100vw - 32px)); max-width: 100%; max-height: calc(100dvh - 32px); overflow: auto; }
+.settings-content, .settings-workspace-body, .settings-workspace-header { min-width: 0; }
+.settings-workspace-body > *, .settings-content > * { max-width: 100%; }
+.settings-content label { display: block; min-width: 0; }
+
+/* Prevent flex/grid children from forcing the viewport wider than the window. */
+.profile-studio > *, .server-profile-layout > *, .permission-editor > *, .role-workspace > *, .dm-page > *, .creation-grid > *, .discovery-grid > * { min-width: 0; }
+img, video, canvas { max-width: 100%; }
+
+@media (max-width: 1100px) {
+  .libracord-canvas { grid-template-columns: 60px 240px minmax(0, 1fr) 250px; }
+  .member-list { font-size: .95em; }
+  .messages { padding-inline: clamp(10px, 2vw, 20px); }
+}
+
+@media (max-width: 899px) {
+  .libracord-canvas { grid-template-columns: 58px minmax(0, 1fr); }
+  .member-list { display: none; }
+  .chat form.message-composer, .dm-composer, .voice-chat-composer, .shared-media-source { max-width: calc(100% - 20px); }
+  .home-body, .admin-body { padding-inline: 16px; }
+  .settings-content { padding-inline: 20px !important; }
+  .profile-studio, .server-profile-layout, .permission-editor, .role-workspace { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+@media (max-width: 620px) {
+  .libracord-canvas, .libracord-canvas.members-collapsed { width: 100%; min-height: 100dvh; grid-template-columns: minmax(0, 1fr) !important; grid-template-rows: minmax(0, 1fr) 58px !important; }
+  .shell:not(.members-collapsed) .member-list { display: block !important; }
+  .home-body, .admin-body { padding-inline: 12px; }
+  .messages { padding-inline: 8px !important; }
+  .chat form.message-composer, .dm-composer, .voice-chat-composer, .shared-media-source { width: calc(100% - 12px); max-width: calc(100% - 12px); }
+  .dialog-card { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); padding: 18px 14px; }
+  .settings-content { padding-inline: 14px !important; }
+  .settings-content input:not([type="checkbox"]):not([type="range"]), .settings-content select, .settings-content textarea { font-size: 16px; }
+  .home-hub h1, .home-hub h2, .admin h1, .admin h2 { overflow-wrap: anywhere; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .001ms !important; animation-duration: .001ms !important; }
+}

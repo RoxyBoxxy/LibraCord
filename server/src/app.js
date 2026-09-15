@@ -78,6 +78,7 @@ import {
   userCanSendToChannel,
   userCanConnectToChannel,
   removeGuildMember,
+  listBotApps, createBotApp, findBotApp, deleteBotApp, createBotToken, listBotTokens, revokeBotToken, findBotToken, touchBotToken, listBotCommands, upsertBotCommand, deleteBotCommand, listAllBotCommands, listGuildBotCommands, createBotInvite, findBotInvite, installBot, listBotInstalls,
   listDirectMessages,
   createDirectMessage,
   setDmPublicKey,
@@ -91,6 +92,7 @@ import {
   banInstanceUser, unbanInstanceUser, listInstanceBans, createInstanceReport,
   listInstanceReports, updateInstanceReport, listInstanceModerationActions,
   listMediaAssets,
+  importDiscordTemplate,
 } from "./db.js";
 import { proxyAsset, sendAsset, storeAsset } from "./assets.js";
 import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js";
@@ -101,7 +103,7 @@ import {
   publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
   syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
 } from "./federation.js";
-import { Permissions, requireGuildPermission } from "./permissions.js";
+import { Permissions, hasPermission, requireGuildPermission } from "./permissions.js";
 
 const execFileAsync = promisify(execFile);
 import {
@@ -177,6 +179,29 @@ const livekitPublicUrl =
   `ws://localhost:${process.env.LIVEKIT_HTTP_PORT || 7880}`;
 const livekitInternalUrl = process.env.LIVEKIT_INTERNAL_URL || livekitPublicUrl;
 const federatedAssetUrl = (value) => value ? new URL(value, `${String(process.env.PUBLIC_URL || `http://${homeServer}`).replace(/\/$/, "")}/`).href : "";
+function discordTemplateCode(value) {
+  const input = String(value || "").trim();
+  try {
+    const url = new URL(input);
+    if (![/^(?:www\.)?discord\.new$/i, /^(?:www\.)?discord\.com$/i].some((pattern) => pattern.test(url.hostname))) return null;
+    const parts = url.pathname.split("/").filter(Boolean);
+    const index = parts.findIndex((part) => part.toLowerCase() === "template");
+    const code = index >= 0 ? parts[index + 1] : parts[0];
+    return /^[A-Za-z0-9_-]{2,64}$/.test(code || "") ? code : null;
+  } catch {
+    return /^[A-Za-z0-9_-]{2,64}$/.test(input) ? input : null;
+  }
+}
+async function fetchDiscordTemplate(value) {
+  const code = discordTemplateCode(value);
+  if (!code) throw new Error("Enter a valid discord.new template link");
+  const response = await fetch(`https://discord.com/api/v9/guilds/templates/${encodeURIComponent(code)}`, { headers: { accept: "application/json", "user-agent": "LibraCord Discord template importer" } });
+  if (!response.ok) throw new Error(`Discord template lookup failed (${response.status})`);
+  const template = await response.json();
+  const source = template?.serialized_source_guild;
+  if (!source || !Array.isArray(source.channels) || !Array.isArray(source.roles)) throw new Error("That Discord template is unavailable or incomplete");
+  return { code, name: template.name || source.name || "Imported community", description: template.description || source.description || "", serialized_source: source };
+}
 const publicUser = (user) => ({
   id: user.id,
   email: user.email,
@@ -272,6 +297,18 @@ function deprecatedEndpoint(res, successor) {
 
 export function createApp() {
   const app = express();
+  const requireBot = (req, res, next) => {
+    const header = String(req.headers.authorization || "");
+    if (!header.startsWith("Bot ")) return res.status(401).json({ error: "Bot authorization required" });
+    const record = findBotToken(createHash("sha256").update(header.slice(4).trim()).digest("hex"));
+    if (!record) return res.status(401).json({ error: "Invalid or revoked bot token" });
+    touchBotToken(record.id); req.bot = record; req.user = { id: record.app_id, owner_id: record.owner_id, bot_app_id: record.app_id, role: "bot", display_name: record.app_name, username: record.app_name }; next();
+  };
+  app.use((req, res, next) => String(req.headers.authorization || "").startsWith("Bot ") ? requireBot(req, res, next) : next());
+  // Developer endpoints can be called by either the bot token itself (for
+  // command registration) or by the owning user session. Keep ownership
+  // checks tied to the application owner in both cases.
+  const botAppOwner = (req) => req.bot?.owner_id || req.user.id;
   app.disable("x-powered-by");
   const configuredClientOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
     .split(",")
@@ -567,6 +604,34 @@ export function createApp() {
   app.get("/api/v1/instance", (_req, res) =>
     res.json({ id: homeServer, ...getInstanceSettings(), api_version: 1 }),
   );
+  app.get("/api/v1/developer/apps", requireUser, (req, res) => res.json({ apps: listBotApps(req.user.id) }));
+  app.post("/api/v1/developer/apps", requireUser, (req, res) => {
+    const name = String(req.body?.name || "").trim().slice(0, 80);
+    if (!name) return res.status(400).json({ error: "Application name is required" });
+    res.status(201).json({ app: createBotApp(req.user.id, name, String(req.body?.description || "").trim().slice(0, 500), Boolean(req.body?.public)) });
+  });
+  app.delete("/api/v1/developer/apps/:id", requireUser, (req, res) => deleteBotApp(req.params.id, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Application not found" }));
+  app.get("/api/v1/developer/apps/:id/tokens", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, req.user.id); return appRecord ? res.json({ tokens: listBotTokens(appRecord.id) }) : res.status(404).json({ error: "Application not found" }); });
+  app.post("/api/v1/developer/apps/:id/tokens", requireUser, (req, res) => {
+    const appRecord = findBotApp(req.params.id, req.user.id); if (!appRecord) return res.status(404).json({ error: "Application not found" });
+    const raw = `lc_bot_${randomBytes(32).toString("base64url")}`;
+    const token = createBotToken(appRecord.id, String(req.body?.label || "default").trim().slice(0, 64) || "default", createHash("sha256").update(raw).digest("hex"));
+    res.status(201).json({ token: raw, tokenInfo: token });
+  });
+  app.delete("/api/v1/developer/apps/:id/tokens/:tokenId", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, req.user.id); return appRecord && revokeBotToken(req.params.tokenId, appRecord.id) ? res.status(204).end() : res.status(404).json({ error: "Token not found" }); });
+  app.get("/api/v1/developer/apps/:id/commands", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, botAppOwner(req)); return appRecord ? res.json({ commands: listBotCommands(appRecord.id) }) : res.status(404).json({ error: "Application not found" }); });
+  app.put("/api/v1/developer/apps/:id/commands/:name", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, botAppOwner(req)), name = String(req.params.name || "").toLowerCase(); if (!appRecord || !/^[a-z0-9_-]{1,32}$/.test(name)) return res.status(400).json({ error: "Invalid application or command name" }); return res.json({ command: upsertBotCommand(appRecord.id, name, String(req.body?.description || "").slice(0, 160), Array.isArray(req.body?.options) ? req.body.options.slice(0, 20) : []) }); });
+  app.delete("/api/v1/developer/apps/:id/commands/:commandId", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, botAppOwner(req)); return appRecord && deleteBotCommand(req.params.commandId, appRecord.id) ? res.status(204).end() : res.status(404).json({ error: "Command not found" }); });
+  app.post("/api/v1/developer/apps/:id/invites", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, req.user.id); if (!appRecord) return res.status(404).json({ error: "Application not found" }); let permissions = "0"; try { permissions = BigInt(String(req.body?.permissions || "0")).toString(); if (BigInt(permissions) < 0n) throw new Error("negative"); } catch { return res.status(400).json({ error: "Permissions must be a non-negative integer mask" }); } res.status(201).json({ invite: createBotInvite(appRecord.id, String(req.body?.guildId || "") || null, permissions, req.user.id, req.body?.expiresAt || null) }); });
+  app.get("/api/v1/developer/apps/:id/installs", requireUser, (req, res) => { const appRecord = findBotApp(req.params.id, req.user.id); return appRecord ? res.json({ installs: listBotInstalls(appRecord.id) }) : res.status(404).json({ error: "Application not found" }); });
+  app.get("/api/v1/bot-invites/:code", (req, res) => { const invite = findBotInvite(req.params.code); if (!invite) return res.status(404).json({ error: "Bot invite is invalid or expired" }); const appRecord = findBotApp(invite.app_id); res.json({ invite: { ...invite, app_name: appRecord?.name || "Bot", app_description: appRecord?.description || "" } }); });
+  app.post("/api/v1/bot-invites/:code/accept", requireUser, (req, res) => { const invite = findBotInvite(req.params.code); if (!invite) return res.status(404).json({ error: "Bot invite is invalid or expired" }); const guildId = String(req.body?.guildId || invite.guild_id || ""); if (!guildId) return res.status(400).json({ error: "Choose a community for this bot" }); const guild = findCommunity(guildId); if (!guild) return res.status(404).json({ error: "Community not found" }); if (!hasPermission(req.user, guildId, Permissions.MANAGE_GUILD)) return res.status(403).json({ error: "You need Manage Server permission to install bots" }); const installed = installBot(invite.app_id, guildId, invite.permissions, req.user.id); res.status(201).json({ install: installed }); });
+  app.get("/api/v1/commands", requireUser, (req, res) => res.json({ commands: [
+    { name: "shrug", description: "Appends a shrug emoticon to your message.", options: [], app_name: "Built-in", built_in: true },
+    { name: "me", description: "Displays text with emphasis.", options: [], app_name: "Built-in", built_in: true },
+    ...(req.query.communityId ? listGuildBotCommands(String(req.query.communityId)) : listAllBotCommands()),
+  ] }));
+  app.get("/api/v1/bot/me", requireBot, (req, res) => res.json({ bot: { id: req.bot.app_id, name: req.bot.app_name, owner_id: req.bot.owner_id } }));
   app.get("/api/v1/users/@me", requireUser, (req, res) =>
     res.json({ user: publicUser(req.user) }),
   );
@@ -980,6 +1045,21 @@ export function createApp() {
     } catch (error) {
       next(error);
     }
+  });
+  app.post("/api/v1/guilds/import-discord-template/preview", requireUser, async (req, res, next) => {
+    try {
+      const template = await fetchDiscordTemplate(req.body?.url);
+      const source = template.serialized_source;
+      const channels = source.channels || [];
+      res.json({ template: { code: template.code, name: template.name, description: template.description, roles: source.roles.length, categories: channels.filter((channel) => Number(channel.type) === 4).length, channels: channels.filter((channel) => Number(channel.type) !== 4).length, channelTypes: Object.fromEntries([...new Set(channels.filter((channel) => Number(channel.type) !== 4).map((channel) => Number(channel.type)))].map((type) => [type, channels.filter((channel) => Number(channel.type) === type).length])) } });
+    } catch (error) { next(error); }
+  });
+  app.post("/api/v1/guilds/import-discord-template", requireUser, async (req, res, next) => {
+    try {
+      const template = await fetchDiscordTemplate(req.body?.url);
+      const guild = importDiscordTemplate({ ownerId: req.user.id, name: String(req.body?.name || template.name).trim().slice(0, 80), description: String(req.body?.description ?? template.description).trim().slice(0, 500), source: template });
+      res.status(201).json({ guild: { ...guild, address: communityAddress(guild, req) } });
+    } catch (error) { next(error); }
   });
   app.post("/api/v1/guilds", requireUser, (req, res) => {
     const name = String(req.body?.name || "")

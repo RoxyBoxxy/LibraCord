@@ -30,6 +30,11 @@ db.exec(`
  CREATE TABLE IF NOT EXISTS messages(id INTEGER PRIMARY KEY AUTOINCREMENT,channel_id TEXT NOT NULL,author_id TEXT NOT NULL,author_name TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,attachments TEXT NOT NULL DEFAULT '[]',content_warning TEXT NOT NULL DEFAULT '',reply_to INTEGER,FOREIGN KEY(channel_id) REFERENCES channels(id));
  CREATE TABLE IF NOT EXISTS direct_messages(id INTEGER PRIMARY KEY AUTOINCREMENT,sender_id TEXT NOT NULL,recipient_id TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,FOREIGN KEY(recipient_id) REFERENCES users(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY,email TEXT NOT NULL UNIQUE,display_name TEXT NOT NULL,password_hash TEXT NOT NULL,role TEXT NOT NULL DEFAULT 'member' CHECK(role IN ('owner','admin','member')),created_at TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS bot_apps(id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',public INTEGER NOT NULL DEFAULT 0,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,FOREIGN KEY(owner_id) REFERENCES users(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS bot_tokens(id TEXT PRIMARY KEY,app_id TEXT NOT NULL,label TEXT NOT NULL DEFAULT 'default',token_hash TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL,last_used_at TEXT,revoked_at TEXT,FOREIGN KEY(app_id) REFERENCES bot_apps(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS bot_commands(id TEXT PRIMARY KEY,app_id TEXT NOT NULL,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',options TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL,updated_at TEXT NOT NULL,UNIQUE(app_id,name),FOREIGN KEY(app_id) REFERENCES bot_apps(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS bot_guild_installs(app_id TEXT NOT NULL,guild_id TEXT NOT NULL,permissions TEXT NOT NULL DEFAULT '0',installed_by TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(app_id,guild_id),FOREIGN KEY(app_id) REFERENCES bot_apps(id) ON DELETE CASCADE,FOREIGN KEY(guild_id) REFERENCES communities(id) ON DELETE CASCADE);
+ CREATE TABLE IF NOT EXISTS bot_invites(code TEXT PRIMARY KEY,app_id TEXT NOT NULL,guild_id TEXT,permissions TEXT NOT NULL DEFAULT '0',created_by TEXT NOT NULL,expires_at TEXT,created_at TEXT NOT NULL,FOREIGN KEY(app_id) REFERENCES bot_apps(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS sessions(id_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
  CREATE TABLE IF NOT EXISTS federation_peers(id TEXT PRIMARY KEY,name TEXT NOT NULL,base_url TEXT NOT NULL UNIQUE,status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','allowed','blocked')),created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,owner_user_id TEXT,kind TEXT NOT NULL,mime_type TEXT NOT NULL,size INTEGER NOT NULL,sha256 TEXT NOT NULL,filename TEXT NOT NULL,origin_instance TEXT,origin_asset_id TEXT,created_at TEXT NOT NULL,FOREIGN KEY(owner_user_id) REFERENCES users(id));
@@ -167,6 +172,7 @@ for (const [name, definition] of [
   ["voice_bitrate", "INTEGER NOT NULL DEFAULT 64000"],
   ["voice_sample_rate", "INTEGER NOT NULL DEFAULT 48000"],
   ["position", "INTEGER NOT NULL DEFAULT 0"],
+  ["source_type", "INTEGER NOT NULL DEFAULT 0"],
 ])
   if (
     !db
@@ -273,6 +279,14 @@ export function userHasChannelPermission(channelId, userId, permissionBit) {
   if (!channel) return false;
   const guild = db.prepare("SELECT * FROM communities WHERE id=?").get(channel.community_id);
   if (!guild) return false;
+  // Bot memberships are represented by the application id rather than a
+  // human user row. Their installed permission mask is authoritative and is
+  // intentionally evaluated before normal role/override membership checks.
+  const installedBotPermissions = botGuildPermissions(userId, channel.community_id);
+  if (installedBotPermissions !== null) {
+    const mask = BigInt(installedBotPermissions);
+    return Boolean((mask & (1n << 3n)) || (mask & BigInt(permissionBit)));
+  }
   if (guild.owner_id === userId) return true;
   const member = db.prepare("SELECT 1 FROM guild_members WHERE guild_id=? AND user_id=?").get(channel.community_id, userId);
   if (!member) return false;
@@ -362,6 +376,25 @@ export function findUserByEmail(email) {
   releaseExpiredInstanceBans();
   return db.prepare("SELECT * FROM users WHERE email=?").get(email);
 }
+export function listBotApps(ownerId) { return db.prepare("SELECT id,name,description,public,created_at,updated_at FROM bot_apps WHERE owner_id=? ORDER BY created_at DESC").all(ownerId); }
+export function createBotApp(ownerId, name, description, isPublic = false) { const id = randomUUID(), now = new Date().toISOString(); db.prepare("INSERT INTO bot_apps(id,owner_id,name,description,public,created_at,updated_at) VALUES(?,?,?,?,?,?,?)").run(id, ownerId, name, description, isPublic ? 1 : 0, now, now); return db.prepare("SELECT id,name,description,public,created_at,updated_at FROM bot_apps WHERE id=?").get(id); }
+export function findBotApp(id, ownerId = null) { return ownerId ? db.prepare("SELECT * FROM bot_apps WHERE id=? AND owner_id=?").get(id, ownerId) : db.prepare("SELECT * FROM bot_apps WHERE id=?").get(id); }
+export function deleteBotApp(id, ownerId) { return db.prepare("DELETE FROM bot_apps WHERE id=? AND owner_id=?").run(id, ownerId).changes > 0; }
+export function createBotToken(appId, label, tokenHash) { const id = randomUUID(); db.prepare("INSERT INTO bot_tokens(id,app_id,label,token_hash,created_at) VALUES(?,?,?,?,?)").run(id, appId, label, tokenHash, new Date().toISOString()); return db.prepare("SELECT id,label,created_at,last_used_at,revoked_at FROM bot_tokens WHERE id=?").get(id); }
+export function listBotTokens(appId) { return db.prepare("SELECT id,label,created_at,last_used_at,revoked_at FROM bot_tokens WHERE app_id=? ORDER BY created_at DESC").all(appId); }
+export function revokeBotToken(id, appId) { return db.prepare("UPDATE bot_tokens SET revoked_at=? WHERE id=? AND app_id=? AND revoked_at IS NULL").run(new Date().toISOString(), id, appId).changes > 0; }
+export function findBotToken(tokenHash) { return db.prepare("SELECT t.*,a.owner_id,a.name AS app_name FROM bot_tokens t JOIN bot_apps a ON a.id=t.app_id WHERE t.token_hash=? AND t.revoked_at IS NULL").get(tokenHash); }
+export function touchBotToken(id) { db.prepare("UPDATE bot_tokens SET last_used_at=? WHERE id=?").run(new Date().toISOString(), id); }
+export function listBotCommands(appId) { return db.prepare("SELECT id,name,description,options FROM bot_commands WHERE app_id=? ORDER BY name").all(appId).map((item) => ({ ...item, options: JSON.parse(item.options || "[]") })); }
+export function upsertBotCommand(appId, name, description, options) { const id = randomUUID(), now = new Date().toISOString(); db.prepare("INSERT INTO bot_commands(id,app_id,name,description,options,created_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(app_id,name) DO UPDATE SET description=excluded.description,options=excluded.options,updated_at=excluded.updated_at").run(id, appId, name, description, JSON.stringify(options), now, now); return db.prepare("SELECT id,name,description,options FROM bot_commands WHERE app_id=? AND name=?").get(appId, name); }
+export function deleteBotCommand(id, appId) { return db.prepare("DELETE FROM bot_commands WHERE id=? AND app_id=?").run(id, appId).changes > 0; }
+export function listAllBotCommands() { return db.prepare("SELECT c.id,c.name,c.description,c.options,a.name AS app_name FROM bot_commands c JOIN bot_apps a ON a.id=c.app_id WHERE a.public=1 ORDER BY c.name").all().map((item) => ({ ...item, options: JSON.parse(item.options || "[]") })); }
+export function listGuildBotCommands(guildId) { return db.prepare("SELECT c.id,c.name,c.description,c.options,a.name AS app_name,a.id AS app_id FROM bot_commands c JOIN bot_apps a ON a.id=c.app_id JOIN bot_guild_installs i ON i.app_id=a.id WHERE i.guild_id=? ORDER BY c.name").all(guildId).map((item) => ({ ...item, options: JSON.parse(item.options || "[]") })); }
+export function createBotInvite(appId, guildId, permissions, createdBy, expiresAt = null) { const code = randomBytes(12).toString("base64url"); db.prepare("INSERT INTO bot_invites(code,app_id,guild_id,permissions,created_by,expires_at,created_at) VALUES(?,?,?,?,?,?,?)").run(code, appId, guildId || null, String(permissions || "0"), createdBy, expiresAt, new Date().toISOString()); return db.prepare("SELECT code,app_id,guild_id,permissions,expires_at,created_at FROM bot_invites WHERE code=?").get(code); }
+export function findBotInvite(code) { return db.prepare("SELECT * FROM bot_invites WHERE code=? AND (expires_at IS NULL OR expires_at>?)").get(code, new Date().toISOString()); }
+export function installBot(appId, guildId, permissions, installedBy) { db.prepare("INSERT INTO bot_guild_installs(app_id,guild_id,permissions,installed_by,created_at) VALUES(?,?,?,?,?) ON CONFLICT(app_id,guild_id) DO UPDATE SET permissions=excluded.permissions,installed_by=excluded.installed_by").run(appId, guildId, String(permissions || "0"), installedBy, new Date().toISOString()); db.prepare("INSERT OR IGNORE INTO guild_members(guild_id,user_id,nickname,joined_at) VALUES(?,?,NULL,?)").run(guildId, appId, new Date().toISOString()); return db.prepare("SELECT * FROM bot_guild_installs WHERE app_id=? AND guild_id=?").get(appId, guildId); }
+export function listBotInstalls(appId) { return db.prepare("SELECT * FROM bot_guild_installs WHERE app_id=? ORDER BY created_at DESC").all(appId); }
+export function botGuildPermissions(appId, guildId) { return db.prepare("SELECT permissions FROM bot_guild_installs WHERE app_id=? AND guild_id=?").get(appId, guildId)?.permissions || null; }
 function releaseExpiredInstanceBans() {
   const now = new Date().toISOString();
   const expired = db.prepare("SELECT user_id FROM instance_bans WHERE revoked_at IS NULL AND expires_at IS NOT NULL AND expires_at<=?").all(now);
@@ -377,6 +410,7 @@ export function findUserByUsername(username) {
 }
 export function listFriends(userId) {
   return db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,u.server_tag,u.server_tag_emoji,
+    COALESCE(json_extract(u.settings,'$.serverTag'),'') AS server_tag_selection,
     COALESCE(json_extract(u.settings,'$.statusText'),'') AS status_text,
     COALESCE(json_extract(u.settings,'$.selectedUsernameStyleIds'),'[]') AS username_style_ids
     FROM users u JOIN friend_requests f ON f.status='accepted' AND ((f.from_user=? AND f.to_user=u.id) OR (f.to_user=? AND f.from_user=u.id))`).all(userId, userId);
@@ -571,10 +605,10 @@ export function removeCommunity(id) {
     throw error;
   }
 }
-export function createChannel({ id, communityId, name, kind, position = 0 }) {
+export function createChannel({ id, communityId, name, kind, position = 0, sourceType = kind === "voice" ? 2 : 0 }) {
   db.prepare(
-    "INSERT INTO channels(id,community_id,name,kind,position) VALUES(?,?,?,?,?)",
-  ).run(id, communityId, name, kind, position);
+    "INSERT INTO channels(id,community_id,name,kind,position,source_type) VALUES(?,?,?,?,?,?)",
+  ).run(id, communityId, name, kind, position, Number(sourceType) || 0);
   return db.prepare("SELECT * FROM channels WHERE id=?").get(id);
 }
 export function listUsers() {
@@ -640,6 +674,7 @@ export function listGuildMembers(guildId) {
   const local = db
     .prepare(
       `SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.accent_color,u.role,
+       COALESCE(json_extract(u.settings,'$.serverTag'),'') AS server_tag_selection,
        COALESCE(json_extract(u.settings,'$.status'),'online') AS presence_status,
        COALESCE(json_extract(u.settings,'$.statusText'),'') AS status_text,
        COALESCE(json_extract(u.settings,'$.selectedDecorationId'),'') AS decoration_id,
@@ -652,6 +687,7 @@ export function listGuildMembers(guildId) {
   const globalCommunityId = `${guildId}#${federationDomainForDb()}`;
   const rolesById = new Map(listGuildRoles(guildId).map((role) => [role.id, role]));
   const remote = db.prepare(`SELECT i.global_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,
+    COALESCE(json_extract(i.profile,'$.server_tag_selection'),'') AS server_tag_selection,
     COALESCE(json_extract(i.profile,'$.accent_color'),'#62efc6') AS accent_color,'remote' AS role,
     'online' AS presence_status,'' AS status_text,'' AS decoration_id,'' AS profile_theme_id,'[]' AS username_style_ids,
     NULL AS nickname,m.joined_at,m.roles FROM remote_memberships m JOIN remote_identities i ON i.global_id=m.user_global_id
@@ -735,6 +771,73 @@ export function updateCategory(id, name, position = 0) {
 }
 export function findCategory(id) {
   return db.prepare("SELECT * FROM channel_categories WHERE id=?").get(id);
+}
+function discordColor(value) {
+  const color = Number(value) || 0;
+  return `#${Math.max(0, Math.min(0xffffff, color)).toString(16).padStart(6, "0")}`;
+}
+export function importDiscordTemplate({ ownerId, name, description, source }) {
+  const guild = source?.serialized_source;
+  if (!guild || typeof guild !== "object") throw new Error("Discord template has no serialized server data");
+  const roles = Array.isArray(guild.roles) ? guild.roles.slice(0, 250) : [];
+  const channels = Array.isArray(guild.channels) ? guild.channels.slice(0, 500) : [];
+  const categories = channels.filter((channel) => Number(channel.type) === 4);
+  const communityId = randomUUID();
+  const roleIds = new Map();
+  const categoryIds = new Map();
+  const now = new Date().toISOString();
+  db.exec("BEGIN");
+  try {
+    const community = createCommunity({ id: communityId, name: String(name || source.name || "Imported community").slice(0, 80), description: String(description ?? source.description ?? "").slice(0, 500), ownerId, profile: { accessMode: "open", importedFrom: "discord-template", discordTemplateCode: source.code || "" } });
+    initializeGuildAccess(communityId, ownerId, randomUUID());
+    const everyone = roles.find((role) => String(role.id) === "0");
+    const managedRole = db.prepare("SELECT id FROM guild_roles WHERE guild_id=? AND managed=1").get(communityId);
+    if (!managedRole) throw new Error("Could not initialize the default role");
+    roleIds.set("0", managedRole.id);
+    if (everyone) db.prepare("UPDATE guild_roles SET permissions=?,color=?,position=? WHERE id=?").run(String(everyone.permissions || "0"), discordColor(everyone.color), Number(everyone.position) || 0, managedRole.id);
+    for (const role of roles.filter((item) => String(item.id) !== "0")) {
+      const id = randomUUID();
+      roleIds.set(String(role.id), id);
+      createGuildRole({ id, guildId: communityId, name: String(role.name || "Imported role").slice(0, 80), color: discordColor(role.color), permissions: String(role.permissions || "0"), position: Number(role.position) || 0 });
+      db.prepare("UPDATE guild_roles SET hoist=?,mentionable=? WHERE id=?").run(role.hoist ? 1 : 0, role.mentionable ? 1 : 0, id);
+    }
+    for (const category of categories) {
+      const id = randomUUID();
+      categoryIds.set(String(category.id), id);
+      createCategory({ id, guildId: communityId, name: String(category.name || "Category").slice(0, 80), position: Number(category.position) || 0 });
+    }
+    const sourceToLocalChannel = new Map();
+    for (const channel of channels.filter((item) => Number(item.type) !== 4)) {
+      const sourceType = Number(channel.type);
+      const kind = [2, 13].includes(sourceType) ? "voice" : "text";
+      const id = randomUUID();
+      sourceToLocalChannel.set(String(channel.id), id);
+      const created = createChannel({ id, communityId, name: String(channel.name || "channel").slice(0, 80), kind, position: Number(channel.position) || 0, sourceType });
+      const categoryId = categoryIds.get(String(channel.parent_id || "")) || null;
+      db.prepare("UPDATE channels SET category_id=?,topic=?,announcement=?,nsfw=?,voice_bitrate=? WHERE id=?").run(categoryId, String(channel.topic || "").slice(0, 1024), sourceType === 5 ? 1 : 0, channel.nsfw ? 1 : 0, Math.max(24000, Math.min(320000, Number(channel.bitrate) || 64000)), created.id);
+    }
+    for (const category of categories) {
+      const localCategoryId = categoryIds.get(String(category.id));
+      for (const overwrite of Array.isArray(category.permission_overwrites) ? category.permission_overwrites : []) {
+        const targetId = roleIds.get(String(overwrite.id));
+        if (!targetId || Number(overwrite.type) !== 0) continue;
+        savePermissionOverride({ id: randomUUID(), guildId: communityId, categoryId: localCategoryId, channelId: null, targetType: "role", targetId, allowMask: String(overwrite.allow || "0"), denyMask: String(overwrite.deny || "0") });
+      }
+    }
+    for (const channel of channels.filter((item) => Number(item.type) !== 4)) {
+      const localChannelId = sourceToLocalChannel.get(String(channel.id));
+      for (const overwrite of Array.isArray(channel.permission_overwrites) ? channel.permission_overwrites : []) {
+        const targetId = roleIds.get(String(overwrite.id));
+        if (!targetId || Number(overwrite.type) !== 0) continue;
+        savePermissionOverride({ id: randomUUID(), guildId: communityId, channelId: localChannelId, categoryId: null, targetType: "role", targetId, allowMask: String(overwrite.allow || "0"), denyMask: String(overwrite.deny || "0") });
+      }
+    }
+    db.exec("COMMIT");
+    return { ...community, roles: listGuildRoles(communityId), categories: listCategories(communityId), channels: listCommunityChannels(communityId), imported: { roles: roles.length, categories: categories.length, channels: channels.filter((item) => Number(item.type) !== 4).length } };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 export function deleteCategory(id) {
   db.prepare("UPDATE channels SET category_id=NULL WHERE category_id=?").run(id);

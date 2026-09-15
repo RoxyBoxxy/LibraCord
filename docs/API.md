@@ -4,6 +4,29 @@ The primary API namespace is `/api/v1`. Authentication and a few compatibility r
 
 ## Authentication
 
+## Developer and bot API
+
+Users can create bot applications in **User Settings → Developer apps**. Bot tokens are shown only once. Send them as `Authorization: Bot <token>`; never expose them in browser code or commit them.
+
+| `GET|POST` | `/api/v1/developer/apps` | User | List or create bot applications |
+| `DELETE` | `/api/v1/developer/apps/:id` | User | Delete an owned application |
+| `GET|POST` | `/api/v1/developer/apps/:id/tokens` | User | List or generate application tokens |
+| `DELETE` | `/api/v1/developer/apps/:id/tokens/:tokenId` | User | Revoke a token |
+| `GET` | `/api/v1/bot/me` | Bot token | Verify the bot identity |
+| `GET` | `/api/v1/commands` | User | List public slash commands for the command picker |
+| `GET` | `/api/v1/developer/apps/:id/commands` | User | List an app's registered commands |
+| `PUT` | `/api/v1/developer/apps/:id/commands/:name` | User | Register or update a slash command |
+| `DELETE` | `/api/v1/developer/apps/:id/commands/:commandId` | User | Remove a registered command |
+| `POST` | `/api/v1/developer/apps/:id/invites` | User | Create a bot invite with a target community and permission mask |
+| `GET` | `/api/v1/developer/apps/:id/installs` | User | List communities where the bot is installed |
+| `GET` | `/api/v1/bot-invites/:code` | Public | Preview a bot invite |
+| `POST` | `/api/v1/bot-invites/:code/accept` | User | Accept a bot invite for a community |
+
+## Discord template import
+
+| `POST` | `/api/v1/guilds/import-discord-template/preview` | User | Preview a `discord.new` template without creating a community |
+| `POST` | `/api/v1/guilds/import-discord-template` | User | Create a community from a Discord template, including roles, categories, channels, and permission overwrites |
+
 Browser authentication uses an HTTP-only session cookie. Send requests with credentials enabled when the client and API are accessed through a browser.
 
 | Method | Path | Description |

@@ -1,4 +1,4 @@
-import { permissionSnapshot } from "./db.js";
+import { permissionSnapshot, botGuildPermissions } from "./db.js";
 export const Permissions = {
   ADMINISTRATOR: 1n << 3n,
   VIEW_CHANNEL: 1n << 10n,
@@ -11,6 +11,12 @@ export const Permissions = {
   CONNECT: 1n << 20n,
 };
 export function hasPermission(user, guildId, permission, channelId = null) {
+  if (user?.role === "bot" && user.bot_app_id) {
+    const installed = botGuildPermissions(user.bot_app_id, guildId);
+    if (installed === null) return false;
+    const mask = BigInt(installed);
+    return Boolean((mask & Permissions.ADMINISTRATOR) || (mask & permission));
+  }
   const { guild, member, roles, overrides } = permissionSnapshot(
     guildId,
     user.id,

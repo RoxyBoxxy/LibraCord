@@ -97,6 +97,8 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   discoverCommunities = ref([]),
   discoverTrait = ref(""),
   invitePreview = ref(null),
+  botInvitePreview = ref(null),
+  botInviteGuild = ref(""),
   homeSources = ref([]),
   unavailableHomeSources = ref(0),
   publishForm = ref({ name: "", description: "" }),
@@ -184,6 +186,9 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   mobileNavOpen = ref(true),
   guildWizardStep = ref("choose"),
   joinCommunityAddress = ref(""),
+  discordTemplateUrl = ref(""),
+  discordTemplatePreview = ref(null),
+  discordTemplateBusy = ref(false),
   newGuild = ref({ name: "", description: "", accessMode: "open" }),
   guildSettingsDialog = ref(false),
   communityBackgroundFile = ref(null),
@@ -279,7 +284,15 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   cameraTestStream = ref(null),
   micMuted = ref(false),
   deafened = ref(false),
-  saved = ref("");
+  saved = ref(""),
+  developerApps = ref([]),
+  developerNewName = ref(""),
+  developerNewDescription = ref(""),
+  developerToken = ref(""),
+  developerInviteGuild = ref(""),
+  developerInvitePermissions = ref("1051648"),
+  slashCommands = ref([]),
+  slashCommandIndex = ref(0);
 const messageElementRefs = new Map();
 function preferredVideoCodec() {
   try {
@@ -300,12 +313,7 @@ const activeCommunity = computed(
     ...federatedGuildEmojis.value,
     ...customEmojis.value,
   ]),
-  communityMemberTag = computed(() => {
-    const community = activeCommunity.value;
-    const published = { text: String(community?.profile?.memberTag || "").trim(), emoji: String(community?.profile?.memberTagEmoji || "").trim() };
-    const selected = settings.value.serverTag;
-    return selected?.text ? selected : published;
-  }),
+  communityMemberTag = computed(() => memberTagFor(user.value) || { text: "", emoji: "" }),
   communityAtmosphereStyle = computed(() => {
     const atmosphere = { ...(activeCommunity.value?.profile?.atmosphere || {}) };
     if (!atmosphere.backgroundUrl && activeCommunity.value?.banner_url) {
@@ -319,8 +327,21 @@ const activeCommunity = computed(
       (width, guild) => width + 72 + Math.min(guild.name.length * 7, 120),
       112,
     );
-    return estimated > dockWidth.value;
-  });
+  return estimated > dockWidth.value;
+});
+function memberTagFor(member) {
+  const isCurrentUser = Boolean(member && user.value && (
+    String(member.id || "") === String(user.value.id || "") ||
+    String(member.identity || "") === String(user.value.id || "")
+  ));
+  let selected = isCurrentUser ? settings.value.serverTag : member?.server_tag_selection;
+  if (typeof selected === "string") {
+    try { selected = JSON.parse(selected); } catch { selected = null; }
+  }
+  const text = String(selected?.text || "").trim();
+  if (!text) return null;
+  return { text, emoji: String(selected?.emoji || "").trim() };
+}
 const sidebarChannelGroups = computed(() => {
   const query = channelSearch.value.trim().toLowerCase();
   const channels = [...(activeCommunity.value?.channels || [])].filter(
@@ -624,6 +645,7 @@ async function submitAuth() {
 async function beginSession(nextUser) {
   user.value = nextUser;
   loadFriendGroups();
+  loadSlashCommands();
   settings.value = { ...settings.value, ...nextUser.settings };
   settings.value.selectedUsernameStyleIds = Array.isArray(settings.value.selectedUsernameStyleIds) ? settings.value.selectedUsernameStyleIds : [];
   setProfileForm(nextUser);
@@ -681,6 +703,11 @@ async function beginSession(nextUser) {
     invitePreview.value = (
       await api(`/api/v1/invites/${encodeURIComponent(inviteCode)}`)
     ).invite;
+  const botInviteCode = location.pathname.match(/^\/bot-invite\/([^/]+)$/)?.[1];
+  if (botInviteCode) {
+    botInvitePreview.value = (await api(`/api/v1/bot-invites/${encodeURIComponent(botInviteCode)}`)).invite;
+    botInviteGuild.value = botInvitePreview.value.guild_id || communities.value[0]?.id || "";
+  }
   if (activeCommunityId.value)
     guildMembers.value = (
       await api(`/api/v1/guilds/${activeCommunityId.value}/members`)
@@ -920,7 +947,9 @@ async function selectChannel(channel) {
   messageRefreshTimer.value = null;
 }
 async function sendMessage() {
-  const body = draft.value.trim();
+  let body = draft.value.trim();
+  if (/^\/shrug(?:\s|$)/i.test(body)) body = `${body.replace(/^\/shrug\s*/i, "").trim()} ${"\u00af\\\\_(\u30c4)_/\u00af"}`.trim();
+  else if (/^\/me\s+/i.test(body)) body = `*${body.replace(/^\/me\s+/i, "").trim()}*`;
   if ((!body && !pendingAttachments.value.length) || !selected.value || selected.value.kind !== "text") return;
   if (!socket.connected) {
     try {
@@ -2015,6 +2044,29 @@ async function joinCommunityByAddress(requestedAddress = "") {
     return true;
   } catch (e) { error.value = e.message; return false; }
 }
+async function previewDiscordTemplate() {
+  discordTemplateBusy.value = true;
+  error.value = "";
+  try { discordTemplatePreview.value = (await api("/api/v1/guilds/import-discord-template/preview", { method: "POST", body: JSON.stringify({ url: discordTemplateUrl.value }) })).template; }
+  catch (e) { error.value = e.message; discordTemplatePreview.value = null; }
+  finally { discordTemplateBusy.value = false; }
+}
+async function importDiscordTemplate() {
+  discordTemplateBusy.value = true;
+  error.value = "";
+  try {
+    const result = await api("/api/v1/guilds/import-discord-template", { method: "POST", body: JSON.stringify({ url: discordTemplateUrl.value, name: discordTemplatePreview.value?.name, description: discordTemplatePreview.value?.description }) });
+    communities.value.push(result.guild);
+    activeCommunityId.value = result.guild.id;
+    guildDialog.value = false;
+    guildWizardStep.value = "choose";
+    discordTemplateUrl.value = "";
+    discordTemplatePreview.value = null;
+    saved.value = "Discord template imported";
+    await selectChannel(result.guild.channels?.find((channel) => channel.kind === "text") || result.guild.channels?.[0]);
+  } catch (e) { error.value = e.message; }
+  finally { discordTemplateBusy.value = false; }
+}
 async function chooseGuild(guild) {
   communityMenuOpen.value = false;
   page.value = "chat";
@@ -2411,11 +2463,13 @@ async function duplicateChannel() {
 }
 async function copyChannelValue(kind) {
   const channel = channelMenu.value.channel;
+  const channelId = String(channel.id || channel.channel_id || channel.channelId || "");
   const value =
     kind === "id"
-      ? channel.id
-      : `${location.origin}/channels/${activeCommunity.value.id}/${channel.id}`;
-  await navigator.clipboard.writeText(value);
+      ? channelId
+      : `${location.origin}/channels/${activeCommunity.value.id}/${channelId}`;
+  if (kind === "id" && (!channelId || channelId === String(channel.name))) { error.value = "This channel has no stable ID; refresh the community and try again."; return; }
+  await navigator.clipboard.writeText(String(value));
   channelMenu.value = null;
   saved.value = kind === "id" ? "Channel ID copied" : "Channel link copied";
 }
@@ -2798,6 +2852,24 @@ async function openSettings() {
     videoDevices.value = [];
   }
 }
+async function loadDeveloperApps() { try { developerApps.value = (await api("/api/v1/developer/apps")).apps || []; } catch (e) { error.value = e.message; } }
+async function createDeveloperApp() { if (!developerNewName.value.trim()) return; const result = await api("/api/v1/developer/apps", { method: "POST", body: JSON.stringify({ name: developerNewName.value, description: developerNewDescription.value }) }); developerApps.value.unshift(result.app); developerNewName.value = ""; developerNewDescription.value = ""; }
+async function createDeveloperToken(appRecord) { const result = await api(`/api/v1/developer/apps/${appRecord.id}/tokens`, { method: "POST", body: JSON.stringify({ label: "default" }) }); developerToken.value = result.token; }
+async function createDeveloperInvite(appRecord) { if (!developerInviteGuild.value) return; const result = await api(`/api/v1/developer/apps/${appRecord.id}/invites`, { method: "POST", body: JSON.stringify({ guildId: developerInviteGuild.value, permissions: developerInvitePermissions.value }) }); await navigator.clipboard.writeText(`${location.origin}/bot-invite/${result.invite.code}`); saved.value = "Bot invite link copied"; }
+async function acceptBotInvite() { if (!botInvitePreview.value || !botInviteGuild.value) return; await api(`/api/v1/bot-invites/${encodeURIComponent(botInvitePreview.value.code)}/accept`, { method: "POST", body: JSON.stringify({ guildId: botInviteGuild.value }) }); botInvitePreview.value = null; saved.value = "Bot installed"; }
+const slashCommandMatches = computed(() => { const value = draft.value.match(/^\/([^\s]*)$/)?.[1]?.toLowerCase(); return value === undefined ? [] : slashCommands.value.filter((command) => command.name.startsWith(value)).slice(0, 30); });
+const slashCommandGroups = computed(() => {
+  const groups = new Map();
+  for (const command of slashCommandMatches.value) {
+    const label = command.built_in || command.app_name === "Built-in" ? "Frequently Used" : (command.app_name || "Bots");
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(command);
+  }
+  return [...groups.entries()].map(([label, commands]) => ({ label, commands, builtIn: label === "Frequently Used" }));
+});
+const slashBotGroups = computed(() => slashCommandGroups.value.filter((group) => !group.builtIn));
+async function loadSlashCommands() { try { const communityId = activeCommunity.value?.id ? `?communityId=${encodeURIComponent(activeCommunity.value.id)}` : ""; slashCommands.value = (await api(`/api/v1/commands${communityId}`)).commands || []; } catch {} }
+function chooseSlashCommand(command) { draft.value = `/${command.name} `; nextTick(() => document.querySelector(".message-composer input")?.focus()); }
 async function openProfile(id, mode = "compact") {
   try {
     if (!publishedItems.value.length)
@@ -3222,6 +3294,7 @@ onBeforeUnmount(() => {
   leaveDmCall();
 });
 watch(user, () => nextTick(setupCommunityDock));
+watch(activeCommunityId, () => loadSlashCommands());
 watch([page, homeTab, activeCommunityId, selected, dmTarget], () => {
   if (!user.value) return;
   localStorage.setItem(`libracord-navigation:${serverOrigin || location.origin}:${user.value.id}`, JSON.stringify({
@@ -3534,6 +3607,7 @@ watch(
         </label>
       </header>
       <template v-if="page === 'chat'">
+        <div class="channel-list-scroll">
         <section v-for="group in sidebarChannelGroups" :key="group.id" class="channel-category-group">
           <span class="label">{{ group.name }}</span>
           <template v-for="channel in group.channels" :key="channel.id">
@@ -3552,13 +3626,14 @@ watch(
           <div v-if="channel.kind === 'voice' && channelPresence(channel).length" class="voice-channel-members">
             <div v-for="participant in channelPresence(channel)" :key="`sidebar-${channel.id}-${participant.identity}`" class="voice-channel-member" :class="{ speaking: participant.speaking, 'has-banner': participant.banner }" :style="participant.banner ? { '--voice-sidebar-banner': `url(${participant.banner})` } : {}">
               <span class="voice-sidebar-avatar"><img v-if="participant.avatar" :src="apiEndpoint(participant.avatar)" alt="" /><b v-else>{{ participant.name?.[0]?.toUpperCase() || '?' }}</b><i></i></span>
-              <strong>{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
+              <strong>{{ participant.name }} <span v-if="memberTagFor(participant)?.text" class="community-member-tag"><i>{{ memberTagFor(participant).emoji }}</i>{{ memberTagFor(participant).text }}</span></strong>
               <span class="voice-sidebar-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i></span>
               <span class="voice-sidebar-media"><FontAwesomeIcon v-if="participant.camera" :icon="faCamera" title="Camera on" /><FontAwesomeIcon v-if="participant.screen" :icon="faDisplay" title="Sharing screen" /><FontAwesomeIcon v-if="participant.muted" :icon="faMicrophoneSlash" title="Muted" /></span>
             </div>
           </div>
           </template>
         </section>
+        </div>
       </template
       ><template v-else-if="page === 'admin'"
         ><section>
@@ -3596,7 +3671,7 @@ watch(
           <span class="label">DIRECT MESSAGES</span>
           <button v-for="friend in openDmUsers" :key="`open-dm-${friend.id}`" class="dm-nav-contact" :class="{ selected: dmTarget?.id === friend.id, 'has-dm-banner': friend.banner_url }" :style="friend.banner_url ? { '--dm-banner': `url(${friend.banner_url})` } : {}" @click="openDm(friend)">
             <span class="dm-nav-avatar"><img v-if="friend.avatar_url" :src="apiEndpoint(friend.avatar_url)" alt="" />{{ !friend.avatar_url ? friend.display_name[0] : '' }}<i></i></span>
-            <span><strong :style="usernameThemeStyle(friend)">{{ friend.display_name }} <span v-if="communityMemberTag.text && !friend.system" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span> <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>@{{ friend.username }}</small><em>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</em></span><i class="dm-online-dot"></i>
+            <span><strong :style="usernameThemeStyle(friend)">{{ friend.display_name }} <span v-if="!friend.system && memberTagFor(friend)?.text" class="community-member-tag"><i>{{ memberTagFor(friend).emoji }}</i>{{ memberTagFor(friend).text }}</span> <b v-if="friend.system" class="system-badge">SYSTEM</b></strong><small>@{{ friend.username }}</small><em>{{ friend.status_text || (friend.system ? 'Official instance messages' : 'Online') }}</em></span><i class="dm-online-dot"></i>
           </button>
           <p v-if="!openDmUsers.length" class="empty">No open conversations yet.</p>
         </section></template
@@ -3691,7 +3766,7 @@ watch(
               />
               <b v-else>{{ repliedMessage(message).author_name?.[0] || '?' }}</b>
             </span>
-            <strong :style="usernameThemeStyle(messageAuthor(repliedMessage(message)))">{{ repliedMessage(message).author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
+            <strong :style="usernameThemeStyle(messageAuthor(repliedMessage(message)))">{{ repliedMessage(message).author_name }} <span v-if="memberTagFor(messageAuthor(repliedMessage(message)))?.text" class="community-member-tag"><i>{{ memberTagFor(messageAuthor(repliedMessage(message))).emoji }}</i>{{ memberTagFor(messageAuthor(repliedMessage(message))).text }}</span></strong>
             <span>{{ repliedMessage(message).body || 'Attachment' }}</span>
           </button>
           <button
@@ -3712,7 +3787,7 @@ watch(
               :style="usernameThemeStyle(messageAuthor(message))"
               @click="openProfile(message.author_id)"
             >
-              {{ message.author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></button
+              {{ message.author_name }} <span v-if="memberTagFor(messageAuthor(message))?.text" class="community-member-tag"><i>{{ memberTagFor(messageAuthor(message)).emoji }}</i>{{ memberTagFor(messageAuthor(message)).text }}</span></button
             ><time>{{
               new Date(message.created_at).toLocaleTimeString([], {
                 hour: "2-digit",
@@ -3827,7 +3902,7 @@ watch(
           <span v-if="participant.banner" class="voice-profile-banner" :style="{ backgroundImage: `url(${apiEndpoint(participant.banner)})` }"></span>
           <img v-if="participant.avatar" class="voice-profile-avatar" :src="apiEndpoint(participant.avatar)" alt="" />
           <span v-else class="voice-placeholder">{{ participant.name?.[0]?.toUpperCase() || '?' }}</span>
-          <span class="voice-name">{{ participant.name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></span>
+            <span class="voice-name">{{ participant.name }} <span v-if="memberTagFor(participant)?.text" class="community-member-tag"><i>{{ memberTagFor(participant).emoji }}</i>{{ memberTagFor(participant).text }}</span></span>
           <span class="voice-activity" :class="{ active: participant.speaking }"><i></i><i></i><i></i><i></i></span>
         </div>
         <button v-if="!voiceConnecting" class="voice-invite-tile voice-join-tile" type="button" @click="joinVoice(selected)">
@@ -3853,7 +3928,7 @@ watch(
         <div class="voice-side-messages">
           <p v-if="!voiceMessages.length" class="voice-chat-empty">No messages yet. Start the voice chat.</p>
           <article v-for="message in voiceMessages" :key="`voice-${message.id}`">
-            <strong>{{ message.author_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong><p v-if="message.body">{{ message.body }}</p>
+            <strong>{{ message.author_name }} <span v-if="memberTagFor(messageAuthor(message))?.text" class="community-member-tag"><i>{{ memberTagFor(messageAuthor(message)).emoji }}</i>{{ memberTagFor(messageAuthor(message)).text }}</span></strong><p v-if="message.body">{{ message.body }}</p>
             <div v-if="message.attachments?.length" class="voice-message-attachments">
               <template v-for="attachment in message.attachments" :key="attachment.id">
                 <button v-if="attachment.mimeType?.startsWith('image/')" type="button" class="voice-image-button" @click="openImageLightbox(attachment.url, attachment.name)"><img :src="apiEndpoint(attachment.url)" :alt="attachment.name" /></button>
@@ -3949,7 +4024,20 @@ watch(
         <label><FontAwesomeIcon :icon="faDisplay" /> Upload a file<input type="file" accept="image/png,image/jpeg,image/gif" @change="uploadMessageAttachment($event); composerMenuOpen = false" /></label>
       </div>
       <div v-if="selected?.kind === 'text' && Object.keys(typingUsers[selected.id] || {}).length" class="typing-indicator"><template v-if="Object.keys(typingUsers[selected.id]).length <= 3">{{ Object.values(typingUsers[selected.id]).join(', ') }} {{ Object.keys(typingUsers[selected.id]).length === 1 ? 'is' : 'are' }} typing</template><template v-else>Multiple people are typing</template></div>
-      <form v-if="selected?.kind === 'text'" @submit.prevent="sendMessage">
+      <div v-if="selected?.kind === 'text' && slashCommandMatches.length" class="slash-command-menu" :class="{ 'has-bot-rail': slashBotGroups.length }">
+        <aside v-if="slashBotGroups.length" class="slash-command-rail" aria-label="Bot commands"><span v-for="group in slashBotGroups" :key="`rail-${group.label}`" :title="group.label">{{ group.label[0] }}</span></aside>
+        <div class="slash-command-results">
+          <section v-for="group in slashCommandGroups" :key="group.label" class="slash-command-group">
+            <h4><span>{{ group.builtIn ? '◷' : '●' }}</span>{{ group.label }}</h4>
+            <button v-for="command in group.commands" :key="`${group.label}-${command.name}`" type="button" class="slash-command-row" @click="chooseSlashCommand(command)">
+              <span class="slash-command-icon">{{ group.builtIn ? '╱' : (command.app_name?.[0] || '◉') }}</span>
+              <span class="slash-command-copy"><strong>/{{ command.name }}</strong><small>{{ command.description || 'Bot command' }}</small></span>
+              <span class="slash-command-source">{{ group.builtIn ? 'Built-in' : command.app_name }}</span>
+            </button>
+          </section>
+        </div>
+      </div>
+      <form v-if="selected?.kind === 'text'" class="message-composer" @submit.prevent="sendMessage">
         <button type="button" class="attachment-button" title="More message options" @click="composerMenuOpen = !composerMenuOpen">＋</button>
         <div v-if="pendingAttachments.length" class="attachment-previews"><span v-for="attachment in pendingAttachments" :key="attachment.id"><img :src="apiEndpoint(attachment.url)" :alt="attachment.name" /><button type="button" :class="{ active: contentWarning }" @click="contentWarning = contentWarning ? '' : 'Content warning'">{{ contentWarning ? 'Content warning' : 'Mark as content warning' }}</button></span></div>
         <input
@@ -4438,7 +4526,7 @@ watch(
           >
         </span>
         <div>
-          <strong :style="usernameThemeStyle(member)">{{ member.nickname || member.display_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></strong>
+          <strong :style="usernameThemeStyle(member)">{{ member.nickname || member.display_name }} <span v-if="memberTagFor(member)?.text" class="community-member-tag"><i>{{ memberTagFor(member).emoji }}</i>{{ memberTagFor(member).text }}</span></strong>
           <span v-if="member.roles?.length" class="member-role-chips"><i v-for="role in member.roles" :key="role.id" :style="{ color: role.color }">{{ role.name }}</i></span>
           <small>{{
             member.status_text || `${member.username}@${user.home_server}`
@@ -4583,6 +4671,24 @@ watch(
       </article>
     </div>
     <div
+      v-if="botInvitePreview"
+      class="dialog-layer invite-layer"
+      @click.self="botInvitePreview = null"
+    >
+      <article class="dialog-card invite-join-card bot-invite-card">
+        <span class="invite-mark">🤖</span>
+        <span class="label">BOT INVITE</span>
+        <h2>Install {{ botInvitePreview.app_name }}</h2>
+        <p>{{ botInvitePreview.app_description || "This bot wants to join your community." }}</p>
+        <label>Community<select v-model="botInviteGuild"><option value="">Choose a community</option><option v-for="community in communities" :key="community.id" :value="community.id">{{ community.name }}</option></select></label>
+        <small>Only community owners and members with Manage Server can install bots.</small>
+        <div>
+          <button type="button" @click="botInvitePreview = null">Not now</button>
+          <button class="primary" type="button" :disabled="!botInviteGuild" @click="acceptBotInvite">Install bot</button>
+        </div>
+      </article>
+    </div>
+    <div
       v-if="guildDialog"
       class="dialog-layer"
       @click.self="guildDialog = false"
@@ -4593,6 +4699,7 @@ watch(
         <div class="community-wizard-choices">
           <button type="button" @click="guildWizardStep = 'create'"><b>＋</b><strong>Create a community</strong><small>Start a space on {{ user.home_server }}</small></button>
           <button type="button" @click="guildWizardStep = 'join'"><b>#</b><strong>Join a community</strong><small>Use servername#homeserver</small></button>
+          <button type="button" @click="guildWizardStep = 'import'"><b>↥</b><strong>Import Discord template</strong><small>Copy a server layout, roles, and permissions</small></button>
         </div>
         <div><button type="button" @click="guildDialog = false">Cancel</button></div>
       </section>
@@ -4614,6 +4721,14 @@ watch(
           <button type="button" @click="guildDialog = false">Cancel</button
           ><button class="primary">Create server</button>
         </div>
+      </form>
+      <form v-else-if="guildWizardStep === 'import'" class="dialog-card community-wizard" @submit.prevent="discordTemplatePreview ? importDiscordTemplate() : previewDiscordTemplate()">
+        <button type="button" class="wizard-back" @click="guildWizardStep = 'choose'">← Back</button>
+        <h2>Import a Discord template</h2>
+        <p>LibraCord will preview the template before creating a new community. Discord forum, announcement, stage, and voice types are preserved and mapped to the closest LibraCord channel behavior.</p>
+        <label>Template link<input v-model.trim="discordTemplateUrl" required placeholder="https://discord.new/ksYf2EEgyXdg" /></label>
+        <div v-if="discordTemplatePreview" class="discord-template-preview"><strong>{{ discordTemplatePreview.name }}</strong><small>{{ discordTemplatePreview.description || 'No description' }}</small><span>{{ discordTemplatePreview.roles }} roles · {{ discordTemplatePreview.categories }} categories · {{ discordTemplatePreview.channels }} channels</span></div>
+        <div><button type="button" @click="guildDialog = false">Cancel</button><button class="primary" :disabled="discordTemplateBusy">{{ discordTemplateBusy ? 'Loading…' : discordTemplatePreview ? 'Import template' : 'Preview template' }}</button></div>
       </form>
       <form v-else class="dialog-card community-wizard" @submit.prevent="joinCommunityByAddress">
         <button type="button" class="wizard-back" @click="guildWizardStep = 'choose'">← Back</button>
@@ -5546,7 +5661,7 @@ watch(
               "Living my best federated life!"
             }}
           </div>
-          <h3>{{ activeProfile.display_name }} <span v-if="communityMemberTag.text" class="community-member-tag"><i>{{ communityMemberTag.emoji }}</i>{{ communityMemberTag.text }}</span></h3>
+          <h3>{{ activeProfile.display_name }} <span v-if="memberTagFor(activeProfile)?.text" class="community-member-tag"><i>{{ memberTagFor(activeProfile).emoji }}</i>{{ memberTagFor(activeProfile).text }}</span></h3>
           <div class="profile-handle">{{ activeProfile.handle }}<template v-if="activeProfile.pronouns"> · {{ activeProfile.pronouns }}</template></div>
           <div class="profile-sparkles">🦈 💠 🦄 💎 #️⃣ 🎁</div>
           <div v-if="activeProfileMode !== 'self'" class="profile-actions">
@@ -5714,6 +5829,10 @@ watch(
           :class="{ selected: settingsTab === 'advanced' }"
           @click="settingsTab = 'advanced'"
         >Advanced</button
+        ><span class="settings-group">Developer</span><button
+          :class="{ selected: settingsTab === 'developer' }"
+          @click="settingsTab = 'developer'; loadDeveloperApps()"
+        >Developer apps</button
         ><template v-if="isAdmin"
           ><span class="settings-group">Administration</span
           ><button
@@ -5781,7 +5900,7 @@ watch(
                 <h3>Server tags</h3>
                 <p class="upload-help">Choose the tag to show on your profile in each community.</p>
                 <div class="server-tag-choice server-tag-choice-global">
-                  <button type="button" :class="{ selected: !settings.serverTag }" @click="settings.serverTag = null">No tag</button>
+                  <button type="button" :class="{ selected: !communityMemberTag.text }" @click="settings.serverTag = null">No tag</button>
                   <template v-for="community in communities" :key="community.id">
                     <button v-if="community.profile?.memberTag" type="button" :class="{ selected: settings.serverTag?.text === community.profile.memberTag && settings.serverTag?.emoji === (community.profile.memberTagEmoji || '') }" @click="settings.serverTag = { text: community.profile.memberTag, emoji: community.profile.memberTagEmoji || '' }">{{ community.profile.memberTagEmoji }}{{ community.profile.memberTag }} <small>({{ community.name }})</small></button>
                   </template>
@@ -6037,7 +6156,12 @@ watch(
           <label v-if="isDesktopApp" class="toggle"><input v-model="settings.hardwareAcceleration" type="checkbox" /> Use hardware acceleration for video</label>
           <p v-if="isDesktopApp" class="settings-help">Restart the desktop app after changing this setting.</p>
           <button class="primary" @click="saveSettings">Save desktop settings</button></template
-        ><template v-else-if="settingsTab === 'advanced'"
+        ><template v-else-if="settingsTab === 'developer'"
+          ><h2>Developer apps</h2><p class="settings-help">Create bot applications and manage their API tokens.</p>
+          <form class="developer-create" @submit.prevent="createDeveloperApp"><input v-model="developerNewName" placeholder="Bot application name" required /><input v-model="developerNewDescription" placeholder="Description" /><button class="primary">Create app</button></form>
+          <article v-for="appRecord in developerApps" :key="appRecord.id" class="developer-app"><div><strong>{{ appRecord.name }}</strong><p>{{ appRecord.description || 'No description' }}</p><code>{{ appRecord.id }}</code></div><div class="developer-app-actions"><button type="button" class="primary" @click="createDeveloperToken(appRecord)">Generate token</button><select v-model="developerInviteGuild" aria-label="Community to install bot"><option value="">Choose a community</option><option v-for="community in communities" :key="community.id" :value="community.id">{{ community.name }}</option></select><select v-model="developerInvitePermissions" aria-label="Bot invite permissions"><option value="2048">Send messages</option><option value="1051648">View, send and join voice</option></select><button type="button" @click="createDeveloperInvite(appRecord)" :disabled="!developerInviteGuild">Copy invite link</button></div></article>
+          <div v-if="developerToken" class="developer-token"><strong>Copy this token now; it will not be shown again.</strong><code>{{ developerToken }}</code></div>
+        </template><template v-else-if="settingsTab === 'advanced'"
           ><h2>Advanced</h2>
           <p class="settings-help">These controls affect rendering throughout the current device.</p>
           <label v-if="isDesktopApp" class="toggle"><input v-model="settings.hardwareAcceleration" type="checkbox" /> Hardware-accelerated video</label>
