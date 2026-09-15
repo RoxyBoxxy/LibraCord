@@ -1634,6 +1634,9 @@ export function saveRemoteMembership(communityGlobalId, userGlobalId, status, ro
     ON CONFLICT(community_global_id,user_global_id) DO UPDATE SET status=excluded.status,roles=excluded.roles,updated_at=excluded.updated_at`)
     .run(communityGlobalId, userGlobalId, status, JSON.stringify(roles), status === "joined" ? now : null, now);
 }
+export function remoteMembershipStatus(communityGlobalId, userGlobalId) {
+  return db.prepare("SELECT status FROM remote_memberships WHERE community_global_id=? AND user_global_id=?").get(communityGlobalId, userGlobalId)?.status || null;
+}
 export function communityFederationSnapshot(guildId, domain) {
   const community = findCommunity(guildId);
   if (!community) return null;

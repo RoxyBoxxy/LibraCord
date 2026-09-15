@@ -708,12 +708,16 @@ async function beginSession(nextUser) {
     botInvitePreview.value = (await api(`/api/v1/bot-invites/${encodeURIComponent(botInviteCode)}`)).invite;
     botInviteGuild.value = botInvitePreview.value.guild_id || communities.value[0]?.id || "";
   }
-  if (activeCommunityId.value)
-    guildMembers.value = (
-      await api(`/api/v1/guilds/${activeCommunityId.value}/members`)
-    ).members;
-  if (activeCommunityId.value) guildRoles.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/roles`)).roles;
-  if (activeCommunityId.value) guildCategories.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/categories`)).categories;
+  const activeSessionGuild = communities.value.find((guild) => guild.id === activeCommunityId.value);
+  if (activeSessionGuild?.remote) {
+    guildMembers.value = [];
+    guildRoles.value = activeSessionGuild.roles || [];
+    guildCategories.value = activeSessionGuild.categories || [];
+  } else {
+    if (activeCommunityId.value) guildMembers.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/members`)).members;
+    if (activeCommunityId.value) guildRoles.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/roles`)).roles;
+    if (activeCommunityId.value) guildCategories.value = (await api(`/api/v1/guilds/${activeCommunityId.value}/categories`)).categories;
+  }
   if (savedNavigation?.page === "home") {
     await openHome(savedNavigation.homeTab || "feed");
     if (savedNavigation.homeTab === "dm" && savedNavigation.dmUserId) {
@@ -913,6 +917,9 @@ async function logout() {
   messages.value = [];
   page.value = "chat";
 }
+function isRemoteCommunity(community = activeCommunity.value) {
+  return Boolean(community?.remote || String(community?.id || "").includes("#"));
+}
 async function selectChannel(channel) {
   page.value = "chat";
   mobileNavOpen.value = false;
@@ -940,18 +947,24 @@ async function selectChannel(channel) {
     }
     return joinVoice(channel);
   }
-  socket.emit("channel:join", channel.id);
-  messages.value = (await api(`/api/v1/channels/${channel.id}/messages`)).messages || [];
+  const remoteChannel = isRemoteCommunity();
+  if (!remoteChannel) socket.emit("channel:join", channel.id);
+  const loadMessages = async () => {
+    const nextMessages = (await api(`/api/v1/channels/${channel.id}/messages`)).messages || [];
+    if (messages.value.length !== nextMessages.length || messages.value.at(-1)?.id !== nextMessages.at(-1)?.id)
+      messages.value = nextMessages;
+  };
+  await loadMessages();
   // Message delivery is realtime over Socket.IO. Avoid polling the entire
   // list because replacing the array can disturb a user's scroll position.
-  messageRefreshTimer.value = null;
+  messageRefreshTimer.value = remoteChannel ? window.setInterval(() => void loadMessages().catch(() => {}), 5000) : null;
 }
 async function sendMessage() {
   let body = draft.value.trim();
   if (/^\/shrug(?:\s|$)/i.test(body)) body = `${body.replace(/^\/shrug\s*/i, "").trim()} ${"\u00af\\\\_(\u30c4)_/\u00af"}`.trim();
   else if (/^\/me\s+/i.test(body)) body = `*${body.replace(/^\/me\s+/i, "").trim()}*`;
   if ((!body && !pendingAttachments.value.length) || !selected.value || selected.value.kind !== "text") return;
-  if (!socket.connected) {
+  if (!socket.connected || isRemoteCommunity()) {
     try {
       await api(`/api/v1/channels/${selected.value.id}/messages`, {
         method: "POST",
@@ -1273,9 +1286,9 @@ async function joinVoice(channel) {
     // Vue's Proxy, which Electron cannot structured-clone.
     voiceRoom.value = markRaw(room);
     voiceChatChannelName.value = channel.name;
-    socket.emit("voice-chat:join", channel.id);
+    if (!isRemoteCommunity()) socket.emit("voice-chat:join", channel.id);
     voiceConnecting.value = false;
-    socket.emit("voice:changed", channel.id);
+    if (!isRemoteCommunity()) socket.emit("voice:changed", channel.id);
     playUiSound("join");
     syncVoiceParticipants();
     await room.localParticipant.setMicrophoneEnabled(
@@ -1341,7 +1354,7 @@ async function sendVoiceMessage() {
   const channelId = voiceRoom.value?.__channelId;
   const body = voiceDraft.value.trim();
   if (!channelId || (!body && !voicePendingAttachments.value.length)) return;
-  if (!socket.connected) {
+  if (!socket.connected || isRemoteCommunity()) {
     try {
       const result = await api(`/api/v1/voice/channels/${channelId}/messages`, {
         method: "POST",
@@ -1618,7 +1631,7 @@ function syncVoiceParticipants() {
       return {
         sid: participant.sid,
         userId: participant.identity,
-        identity: member?.display_name || participant.identity,
+        identity: member?.display_name || participant.name || participant.identity,
         local: false,
         avatar: member?.avatar_url || "",
         banner: member?.banner_url || "",
@@ -2071,6 +2084,15 @@ async function chooseGuild(guild) {
   communityMenuOpen.value = false;
   page.value = "chat";
   activeCommunityId.value = guild.id;
+  if (guild.remote) {
+    guildMembers.value = [];
+    guildRoles.value = guild.roles || [];
+    guildCategories.value = guild.categories || [];
+    guildEmojis.value = [];
+    const firstRemoteChannel = guild.channels?.find((channel) => channel.kind === "text") || guild.channels?.find((channel) => channel.kind === "voice");
+    if (firstRemoteChannel) await selectChannel(firstRemoteChannel);
+    return;
+  }
   guildMembers.value = (
     await api(`/api/v1/guilds/${guild.id}/members`)
   ).members;

@@ -83,7 +83,7 @@ import {
   createDirectMessage,
   setDmPublicKey,
   listFriends, sendFriendRequest, listFriendRequests, acceptFriendRequest, removeFriend,
-  listRemoteCommunitiesForUser, listFederatedDms, findRemoteIdentity,
+  listRemoteCommunitiesForUser, remoteMembershipStatus, listFederatedDms, findRemoteIdentity,
   findFederatedDmKey, listPeerPolicies, savePeerPolicy, createAbuseReport, listAbuseReports,
   communityFederationSnapshot,
   findPeerByDomain, saveRemoteIdentity,
@@ -99,7 +99,7 @@ import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js
 import { checkBrowserNavigation } from "./plugins/browser-policy.js";
 import { moderationEvents } from "./moderation-events.js";
 import {
-  canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope,
+  canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope, signEnvelope,
   publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
   syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
 } from "./federation.js";
@@ -340,6 +340,71 @@ export function createApp() {
     "/uploads",
     express.static(uploadsDirectory, { fallthrough: false, maxAge: "7d" }),
   );
+  const remoteChannelFor = (userId, channelId) => {
+    const globalUserId = `${userId}#${federationDomain()}`;
+    for (const remote of listRemoteCommunitiesForUser(globalUserId)) {
+      if (remote.status !== "joined") continue;
+      const channel = (remote.state?.channels || []).find((item) => String(item.id) === String(channelId));
+      if (channel) return { remote, channel };
+    }
+    return null;
+  };
+  const remoteCommunityFor = (userId, communityId) => {
+    const globalUserId = `${userId}#${federationDomain()}`;
+    return listRemoteCommunitiesForUser(globalUserId).find((remote) => remote.status === "joined" && String(remote.global_id) === String(communityId)) || null;
+  };
+  const requestRemoteChannel = async (req, channelId, action, input = {}) => {
+    const match = remoteChannelFor(req.user.id, channelId);
+    if (!match) return null;
+    const peer = findPeerByDomain(match.remote.origin);
+    if (!peer || peer.status !== "allowed") throw new Error("Remote community instance is not an allowed peer");
+    const envelope = signEnvelope({
+      destination: match.remote.origin,
+      type: "channel.request",
+      entityId: `${match.remote.global_id}:${channelId}`,
+      payload: {
+        action,
+        community_id: match.remote.remote_id,
+        channel_id: String(channelId),
+        user_global_id: `${req.user.id}#${federationDomain()}`,
+        ...input,
+      },
+    });
+    const response = await federationFetch(peer, "/api/v1/federation/channel", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(envelope),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `Remote channel request returned ${response.status}`);
+    return result;
+  };
+  const requestRemoteVoice = async (req, { channelId = "", communityId = "", action, input = {} } = {}) => {
+    const match = channelId ? remoteChannelFor(req.user.id, channelId) : { remote: remoteCommunityFor(req.user.id, communityId) };
+    if (!match?.remote) return null;
+    const peer = findPeerByDomain(match.remote.origin);
+    if (!peer || peer.status !== "allowed") throw new Error("Remote community instance is not an allowed peer");
+    const envelope = signEnvelope({
+      destination: match.remote.origin,
+      type: "voice.request",
+      entityId: `${match.remote.global_id}:${channelId || communityId}`,
+      payload: {
+        action,
+        community_id: match.remote.remote_id,
+        channel_id: String(channelId || ""),
+        user_global_id: `${req.user.id}#${federationDomain()}`,
+        ...input,
+      },
+    });
+    const response = await federationFetch(peer, "/api/v1/federation/voice", {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify(envelope),
+    });
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(result.error || `Remote voice request returned ${response.status}`);
+    return result;
+  };
   app.get("/health", (_req, res) => res.json({ ok: true }));
 
   // Publish one convergent community snapshot after successful local mutations.
@@ -689,6 +754,76 @@ export function createApp() {
       members: _members, member_roles: _memberRoles, remote_members: _remoteMembers, bans: _bans,
       moderation_actions: _moderation, ...publicCommunity } = snapshot;
     return res.json({ community: publicCommunity });
+  });
+  app.post("/api/v1/federation/channel", async (req, res) => {
+    try {
+      await verifyEnvelope(req.body);
+      if (req.body?.type !== "channel.request") return res.status(400).json({ error: "Expected a channel.request envelope" });
+      const payload = req.body.payload || {};
+      const communityId = String(payload.community_id || "");
+      const channelId = String(payload.channel_id || "");
+      const userGlobalId = String(payload.user_global_id || "");
+      const channel = findChannel(channelId);
+      if (!communityId || !channel || channel.community_id !== communityId || !["text", "voice"].includes(channel.kind))
+        return res.status(404).json({ error: "Channel not found" });
+      if (!userGlobalId.endsWith(`#${String(req.body.origin || "").toLowerCase()}`) || remoteMembershipStatus(`${communityId}#${federationDomain()}`, userGlobalId) !== "joined")
+        return res.status(403).json({ error: "Remote community membership required" });
+      if (payload.action === "list") return res.json({ messages: listMessages(channelId) });
+      if (payload.action !== "create") return res.status(400).json({ error: "Unsupported channel action" });
+      const body = String(payload.body || "").trim().slice(0, 4000);
+      const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 8) : [];
+      if ((!body && !attachments.length) || !userGlobalId) return res.status(400).json({ error: "Valid message content is required" });
+      const message = createMessage({
+        channelId,
+        authorId: userGlobalId,
+        authorName: String(payload.author_name || "Remote user").trim().slice(0, 80),
+        body,
+        attachments,
+        contentWarning: String(payload.content_warning || "").trim().slice(0, 120),
+        replyTo: payload.reply_to ? Number(payload.reply_to) : null,
+      });
+      return res.status(201).json({ message });
+    } catch (error) {
+      if (error.status === 429) res.set("retry-after", "60");
+      return res.status(error.status || 400).json({ error: error.message });
+    }
+  });
+  app.post("/api/v1/federation/voice", async (req, res) => {
+    try {
+      await verifyEnvelope(req.body);
+      if (req.body?.type !== "voice.request") return res.status(400).json({ error: "Expected a voice.request envelope" });
+      const payload = req.body.payload || {};
+      const communityId = String(payload.community_id || "");
+      const channelId = String(payload.channel_id || "");
+      const userGlobalId = String(payload.user_global_id || "");
+      const status = remoteMembershipStatus(`${communityId}#${federationDomain()}`, userGlobalId);
+      if (!communityId || !userGlobalId.endsWith(`#${String(req.body.origin || "").toLowerCase()}`) || status !== "joined")
+        return res.status(403).json({ error: "Remote community membership required" });
+      if (payload.action === "presence") {
+        if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) return res.json({ channels: {} });
+        const channels = listCommunityChannels(communityId).filter((channel) => channel.kind === "voice");
+        const lk = new LiveKitAPI({ host: livekitInternalUrl.replace(/^ws/, "http"), apiKey: process.env.LIVEKIT_API_KEY.trim(), secret: process.env.LIVEKIT_API_SECRET.trim() });
+        const entries = await Promise.all(channels.map(async (channel) => {
+          const participants = await lk.room.listParticipants(`voice:${communityId}:${channel.id}`);
+          return [channel.id, participants.map((participant) => {
+            const tracks = participant.tracks || [];
+            return { identity: participant.identity, name: participant.name, camera: tracks.some((track) => track.source === 1 && !track.muted), screen: tracks.some((track) => track.source === 3 && !track.muted), muted: tracks.some((track) => track.source === 2 && track.muted) };
+          })];
+        }));
+        return res.json({ channels: Object.fromEntries(entries) });
+      }
+      const channel = findChannel(channelId);
+      if (!channel || channel.community_id !== communityId || channel.kind !== "voice") return res.status(404).json({ error: "Voice channel not found" });
+      if (payload.action !== "token") return res.status(400).json({ error: "Unsupported voice action" });
+      if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) return res.status(503).json({ error: "LiveKit is not configured" });
+      const roomName = `voice:${communityId}:${channelId}`;
+      const token = new AccessToken(process.env.LIVEKIT_API_KEY.trim(), process.env.LIVEKIT_API_SECRET.trim(), { identity: userGlobalId, name: String(payload.display_name || "Remote user").slice(0, 80), ttl: "2h" });
+      token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
+      return res.json({ token: await token.toJwt(), url: livekitPublicUrl, room: roomName });
+    } catch (error) {
+      if (error.status === 429) res.set("retry-after", "60");
+      return res.status(error.status || 400).json({ error: error.message });
+    }
   });
   app.get("/api/v1/federation/identities/:id", (req, res) => {
     const identity = findPublicUser(req.params.id);
@@ -1585,22 +1720,31 @@ export function createApp() {
       res.status(201).json({ webhook });
     },
   );
-  app.get("/api/v1/channels/:id/messages", requireUser, (req, res) =>
-    channelExists(req.params.id, "text") && userCanAccessChannel(req.params.id, req.user.id)
-      ? res.json({ messages: listMessages(req.params.id) })
-      : res.status(404).json({ error: "Text channel not found" }),
-  );
-  app.post("/api/v1/channels/:id/messages", requireUser, (req, res) => {
+  app.get("/api/v1/channels/:id/messages", requireUser, async (req, res, next) => {
+    if (channelExists(req.params.id, "text") && userCanAccessChannel(req.params.id, req.user.id))
+      return res.json({ messages: listMessages(req.params.id) });
+    try {
+      const remote = await requestRemoteChannel(req, req.params.id, "list");
+      return remote ? res.json(remote) : res.status(404).json({ error: "Text channel not found" });
+    } catch (error) { return next(error); }
+  });
+  app.post("/api/v1/channels/:id/messages", requireUser, async (req, res, next) => {
     const body = String(req.body?.content || "")
       .trim()
       .slice(0, 4000);
     const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, 8) : [],
       contentWarning = String(req.body?.contentWarning || "").trim().slice(0, 120),
       replyTo = req.body?.replyTo ? Number(req.body.replyTo) : null;
-    if ((!body && !attachments.length) || !channelExists(req.params.id, "text") || !userCanSendToChannel(req.params.id, req.user.id))
-      return res
-        .status(400)
-        .json({ error: "Valid message content and text channel are required" });
+    if (!channelExists(req.params.id, "text")) {
+      try {
+        const remote = await requestRemoteChannel(req, req.params.id, "create", {
+          body, attachments, content_warning: contentWarning, reply_to: replyTo, author_name: req.user.display_name,
+        });
+        return remote ? res.status(201).json(remote) : res.status(400).json({ error: "Valid message content and text channel are required" });
+      } catch (error) { return next(error); }
+    }
+    if ((!body && !attachments.length) || !userCanSendToChannel(req.params.id, req.user.id))
+      return res.status(400).json({ error: "Valid message content and text channel are required" });
     res.status(201).json({
       message: createMessage({
         channelId: req.params.id,
@@ -1611,7 +1755,8 @@ export function createApp() {
     });
   });
   app.post("/api/v1/channels/:id/attachments", requireUser, (req, res) => {
-    if (!channelExists(req.params.id, "text") || !userCanSendToChannel(req.params.id, req.user.id))
+    const remote = remoteChannelFor(req.user.id, req.params.id);
+    if ((!channelExists(req.params.id, "text") && !remote) || (channelExists(req.params.id, "text") && !userCanSendToChannel(req.params.id, req.user.id)))
       return res.status(404).json({ error: "Text channel not found" });
     upload.single("file")(req, res, (error) => {
       if (error || !req.file) return res.status(400).json({ error: error?.message || "Choose an image" });
@@ -1619,22 +1764,32 @@ export function createApp() {
       return res.status(201).json({ attachment: { id: asset.id, url: `/api/v1/assets/${asset.id}`, name: req.file.originalname, mimeType: req.file.mimetype } });
     });
   });
-  app.get("/api/v1/voice/channels/:id/messages", requireUser, (req, res) =>
-    channelExists(req.params.id, "voice") && userCanConnectToChannel(req.params.id, req.user.id)
-      ? res.json({ messages: listMessages(req.params.id) })
-      : res.status(404).json({ error: "Voice channel not found" }),
-  );
-  app.post("/api/v1/voice/channels/:id/messages", requireUser, (req, res) => {
+  app.get("/api/v1/voice/channels/:id/messages", requireUser, async (req, res, next) => {
+    if (channelExists(req.params.id, "voice") && userCanConnectToChannel(req.params.id, req.user.id))
+      return res.json({ messages: listMessages(req.params.id) });
+    try {
+      const remote = await requestRemoteChannel(req, req.params.id, "list");
+      return remote ? res.json(remote) : res.status(404).json({ error: "Voice channel not found" });
+    } catch (error) { return next(error); }
+  });
+  app.post("/api/v1/voice/channels/:id/messages", requireUser, async (req, res, next) => {
     const body = String(req.body?.content || "").trim().slice(0, 4000);
     const attachments = Array.isArray(req.body?.attachments) ? req.body.attachments.slice(0, 8) : [];
-    if ((!body && !attachments.length) || !channelExists(req.params.id, "voice") || !userCanConnectToChannel(req.params.id, req.user.id))
+    if (!channelExists(req.params.id, "voice")) {
+      try {
+        const remote = await requestRemoteChannel(req, req.params.id, "create", { body, attachments, author_name: req.user.display_name });
+        return remote ? res.status(201).json(remote) : res.status(400).json({ error: "Valid message content and voice channel are required" });
+      } catch (error) { return next(error); }
+    }
+    if ((!body && !attachments.length) || !userCanConnectToChannel(req.params.id, req.user.id))
       return res.status(400).json({ error: "Valid message content and voice channel are required" });
     return res.status(201).json({
       message: createMessage({ channelId: req.params.id, authorId: req.user.id, authorName: req.user.display_name, body, attachments }),
     });
   });
   app.post("/api/v1/voice/channels/:id/attachments", requireUser, (req, res) => {
-    if (!channelExists(req.params.id, "voice") || !userCanConnectToChannel(req.params.id, req.user.id))
+    const remote = remoteChannelFor(req.user.id, req.params.id);
+    if ((!channelExists(req.params.id, "voice") && !remote) || (channelExists(req.params.id, "voice") && !userCanConnectToChannel(req.params.id, req.user.id)))
       return res.status(404).json({ error: "Voice channel not found" });
     messageFileUpload.single("file")(req, res, (error) => {
       if (error || !req.file) return res.status(400).json({ error: error?.message || "Choose a file" });
@@ -1838,6 +1993,10 @@ export function createApp() {
       token.addGrant({ roomJoin: true, room: roomName, canPublish: true, canSubscribe: true });
       return res.json({ token: await token.toJwt(), url: livekitPublicUrl, room: roomName });
     }
+    if (!channelExists(channelId, "voice")) {
+      const remote = await requestRemoteVoice(req, { channelId, action: "token", input: { display_name: req.user.display_name } });
+      if (remote) return res.json(remote);
+    }
     if (!channelExists(channelId, "voice") || !userCanConnectToChannel(channelId, req.user.id))
       return res.status(404).json({ error: "Voice channel not found" });
     const voiceChannel = findChannel(String(channelId));
@@ -1862,6 +2021,12 @@ export function createApp() {
   });
   app.get("/api/v1/voice/presence", requireUser, async (req, res) => {
     const communityId = String(req.query.communityId || "");
+    if (remoteCommunityFor(req.user.id, communityId)) {
+      try {
+        const remote = await requestRemoteVoice(req, { communityId, action: "presence" });
+        return res.json(remote || { channels: {} });
+      } catch { return res.json({ channels: {} }); }
+    }
     const channels = listCommunityChannels(communityId).filter((channel) => channel.kind === "voice");
     if (!process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET)
       return res.json({ channels: {} });
