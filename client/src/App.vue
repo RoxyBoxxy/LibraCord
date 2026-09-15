@@ -42,6 +42,9 @@ import {
   faFilm,
   faXmark,
 } from "@fortawesome/free-solid-svg-icons";
+function normalizeApiPath(value) {
+  return String(value || "").replace(/(\/api\/v1\/guilds\/[^\/?#]+)#([^\/?#]+)/g, "$1%23$2");
+}
 const configuredServer = new URLSearchParams(window.location.search).get("server"),
   serverOrigin = configuredServer ? configuredServer.replace(/\/$/, "") : "",
   isDesktopApp = Boolean(window.libracordDesktop),
@@ -52,7 +55,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
     if (/^(https?:|data:|blob:)/i.test(path)) return path;
     const normalized = /^[a-f0-9-]{36}$/i.test(path)
       ? `/api/v1/assets/${path}`
-      : path.startsWith("/") ? path : `/${path}`;
+      : normalizeApiPath(path.startsWith("/") ? path : `/${path}`);
     return serverOrigin ? `${serverOrigin}${normalized}` : normalized;
   },
   dmPrivateKey = ref(null),
@@ -574,7 +577,8 @@ const defaultEmojiGroups = [
 async function api(path, options = {}) {
   let response;
   try {
-    response = await fetch(serverOrigin ? `${serverOrigin}${path}` : path, {
+    const safePath = normalizeApiPath(path);
+    response = await fetch(serverOrigin ? `${serverOrigin}${safePath}` : safePath, {
       credentials: "include",
       cache: "no-store",
       ...options,
