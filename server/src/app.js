@@ -376,6 +376,9 @@ export function createApp() {
         channel_id: String(channelId),
         user_global_id: `${req.user.id}#${federationDomain()}`,
         ...input,
+        attachments: Array.isArray(input.attachments)
+          ? input.attachments.map((attachment) => ({ ...attachment, url: federatedAssetUrl(attachment.url) }))
+          : input.attachments,
       },
     });
     const response = await federationFetch(peer, "/api/v1/federation/channel", {
@@ -838,7 +841,14 @@ export function createApp() {
         return res.status(404).json({ error: "Channel not found" });
       if (!userGlobalId.endsWith(`#${String(req.body.origin || "").toLowerCase()}`) || remoteMembershipStatus(`${communityId}#${federationDomain()}`, userGlobalId) !== "joined")
         return res.status(403).json({ error: "Remote community membership required" });
-      if (payload.action === "list") return res.json({ messages: listMessages(channelId) });
+      const federatedMessage = (message) => ({
+        ...message,
+        attachments: (message.attachments || []).map((attachment) => ({
+          ...attachment,
+          url: federatedAssetUrl(attachment.url),
+        })),
+      });
+      if (payload.action === "list") return res.json({ messages: listMessages(channelId).map(federatedMessage) });
       if (payload.action !== "create") return res.status(400).json({ error: "Unsupported channel action" });
       const body = String(payload.body || "").trim().slice(0, 4000);
       const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 8) : [];
@@ -852,7 +862,7 @@ export function createApp() {
         contentWarning: String(payload.content_warning || "").trim().slice(0, 120),
         replyTo: payload.reply_to ? Number(payload.reply_to) : null,
       });
-      return res.status(201).json({ message });
+      return res.status(201).json({ message: federatedMessage(message) });
     } catch (error) {
       if (error.status === 429) res.set("retry-after", "60");
       return res.status(error.status || 400).json({ error: error.message });
