@@ -1246,9 +1246,16 @@ function messageSegments(body) {
     return emoji && byName.get(emoji) ? { type: "emoji", ...byName.get(emoji) } : { type: "text", value };
   });
 }
+function memberForFederatedIdentity(identity) {
+  const id = String(identity || ""), ownId = String(user.value?.id || "");
+  if (id === ownId || id.startsWith(`${ownId}#`)) return user.value;
+  const direct = guildMembers.value.find((member) => String(member.id) === id);
+  if (direct) return direct;
+  const origin = activeCommunity.value?.origin;
+  return origin && !id.includes("#") ? guildMembers.value.find((member) => String(member.id) === `${id}#${origin}`) || null : null;
+}
 function messageAuthor(message) {
-  if (message.author_id === user.value?.id) return user.value;
-  return guildMembers.value.find((member) => member.id === message.author_id) || null;
+  return memberForFederatedIdentity(message.author_id);
 }
 function repliedMessage(message) {
   if (!message?.reply_to) return null;
@@ -1556,7 +1563,7 @@ function voiceColor(identity) {
 function channelPresence(channel) {
   void voiceMediaVersion.value;
   return (voiceChannelPresence.value[channel.id] || []).map((entry) => {
-    const member = guildMembers.value.find((item) => item.id === entry.identity || item.username === entry.identity);
+    const member = memberForFederatedIdentity(entry.identity) || guildMembers.value.find((item) => item.username === entry.identity);
     const live = channel.id === voiceRoom.value?.__channelId
       ? voiceParticipants.value.find((item) => item.userId === entry.identity || item.identity === entry.name)
       : null;
@@ -1565,6 +1572,8 @@ function channelPresence(channel) {
     const camera = local?.isCameraEnabled || Boolean(remote?.getTrackPublication?.(Track.Source.Camera)?.track) || entry.camera;
     return {
       ...entry,
+      ...(member || {}),
+      identity: entry.identity,
       name: member?.display_name || entry.name || entry.identity,
       avatar: member?.avatar_url || live?.avatar || "",
       banner: member?.banner_url || live?.banner || "",
@@ -1788,14 +1797,13 @@ function syncVoiceParticipants() {
   if (!voiceRoom.value) return;
   const local = voiceRoom.value.localParticipant;
   voiceParticipants.value = [
-    { sid: local.sid, userId: user.value.id, identity: user.value.display_name, local: true, avatar: user.value.avatar_url, banner: user.value.banner_url, color: user.value.accent_color },
+    { sid: local.sid, id: user.value.id, userId: user.value.id, identity: user.value.display_name, local: true, avatar: user.value.avatar_url, banner: user.value.banner_url, color: user.value.accent_color },
     ...[...voiceRoom.value.remoteParticipants.values()].map((participant) => {
       const savedVolume = voiceUserVolumes.value[participant.sid];
       if (savedVolume != null) participant.setVolume?.(Number(savedVolume) / 100);
-      const member = guildMembers.value.find(
-        (entry) => entry.id === participant.identity || entry.username === participant.identity,
-      );
+      const member = memberForFederatedIdentity(participant.identity) || guildMembers.value.find((entry) => entry.username === participant.identity);
       return {
+        ...(member || {}),
         sid: participant.sid,
         userId: participant.identity,
         identity: member?.display_name || participant.name || participant.identity,

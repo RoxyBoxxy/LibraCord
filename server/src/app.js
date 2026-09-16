@@ -875,6 +875,7 @@ export function createApp() {
         return res.status(403).json({ error: "Remote community membership required" });
       const federatedMessage = (message) => ({
         ...message,
+        author_id: String(message.author_id || "").includes("#") ? message.author_id : `${message.author_id}#${federationDomain()}`,
         attachments: (message.attachments || []).map((attachment) => ({
           ...attachment,
           url: federatedAssetUrl(attachment.url),
@@ -949,7 +950,8 @@ export function createApp() {
           const participants = await lk.room.listParticipants(`voice:${communityId}:${channel.id}`);
           return [channel.id, participants.map((participant) => {
             const tracks = participant.tracks || [];
-            return { identity: participant.identity, name: participant.name, camera: tracks.some((track) => track.source === 1 && !track.muted), screen: tracks.some((track) => track.source === 3 && !track.muted), muted: tracks.some((track) => track.source === 2 && track.muted) };
+            const identity = String(participant.identity || "");
+            return { identity: identity.includes("#") ? identity : `${identity}#${federationDomain()}`, name: participant.name, camera: tracks.some((track) => track.source === 1 && !track.muted), screen: tracks.some((track) => track.source === 3 && !track.muted), muted: tracks.some((track) => track.source === 2 && track.muted) };
           })];
         }));
         return res.json({ channels: Object.fromEntries(entries) });
