@@ -233,23 +233,30 @@ export async function publishCommunityDeleted(guildId, peers) {
     payload: { global_id: globalId, deleted_at: new Date().toISOString() } })));
 }
 
-let deliveringOutbox = false;
+let deliveringOutbox = false, deliveryRequested = false;
 export async function deliverFederationOutbox() {
-  if (deliveringOutbox) return 0;
+  // If an event arrives while a batch is delivering, run another batch before
+  // yielding. Otherwise live changes can sit until the 10-second retry tick.
+  if (deliveringOutbox) { deliveryRequested = true; return 0; }
   deliveringOutbox = true;
   try {
-  const due = listDueFederationOutbox(50);
-  await Promise.allSettled(due.map(async (item) => {
-    try {
-      const response = await federationFetch({ base_url: item.base_url }, "/api/v1/federation/inbox", {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" }, body: item.envelope,
-      });
-      if (!response.ok && response.status !== 409) throw new Error(`Peer returned ${response.status}`);
-      markFederationDelivery(item.event_id, item.peer_id, true);
-    } catch (error) { markFederationDelivery(item.event_id, item.peer_id, false, error.message); }
-  }));
-  return due.length;
+    let delivered = 0;
+    do {
+      deliveryRequested = false;
+      const due = listDueFederationOutbox(50);
+      await Promise.allSettled(due.map(async (item) => {
+        try {
+          const response = await federationFetch({ base_url: item.base_url }, "/api/v1/federation/inbox", {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json" }, body: item.envelope,
+          });
+          if (!response.ok && response.status !== 409) throw new Error(`Peer returned ${response.status}`);
+          markFederationDelivery(item.event_id, item.peer_id, true);
+        } catch (error) { markFederationDelivery(item.event_id, item.peer_id, false, error.message); }
+      }));
+      delivered += due.length;
+    } while (deliveryRequested);
+    return delivered;
   } finally {
     deliveringOutbox = false;
   }
