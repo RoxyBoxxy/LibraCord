@@ -188,6 +188,9 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   shareSourceTab = ref("applications"),
   networkPanelOpen = ref(false),
   mediaSession = ref(null),
+  activitySession = ref(null),
+  activityMenuOpen = ref(false),
+  jsDosContainer = ref(null),
   mediaLibrary = ref([]),
   mediaSourceDraft = ref(""),
   mediaPosition = ref(0),
@@ -2114,6 +2117,30 @@ function closeSharedMedia() {
   if (focusedVoiceParticipant.value === "__media__") focusedVoiceParticipant.value = null;
   socket.emit("voice:media:update", { channelId: voiceRoom.value?.__channelId, action: "close" });
 }
+let jsDosScript;
+function startActivities() { if (voiceRoom.value) activityMenuOpen.value = !activityMenuOpen.value; }
+function launchJsDosActivity() {
+  const bundleUrl = window.prompt("URL for a self-hosted .jsdos bundle (for example, your licensed Windows 95 bundle):")?.trim();
+  if (!bundleUrl) return;
+  socket.emit("voice:activity:update", { channelId: voiceRoom.value?.__channelId, action: "launch", kind: "jsdos", bundleUrl, title: "JS-DOS" }, (result) => {
+    if (!result?.ok) error.value = result?.error || "Activity could not be launched";
+  });
+  activityMenuOpen.value = false;
+}
+function closeActivity() { socket.emit("voice:activity:update", { channelId: voiceRoom.value?.__channelId, action: "close" }); }
+async function mountJsDosActivity(state) {
+  if (!state?.bundleUrl) return;
+  await nextTick();
+  const host = jsDosContainer.value;
+  if (!host || host.dataset.bundle === state.bundleUrl) return;
+  if (!jsDosScript) jsDosScript = new Promise((resolve, reject) => {
+    const css = document.createElement("link"); css.rel = "stylesheet"; css.href = "https://v8.js-dos.com/latest/js-dos.css"; document.head.append(css);
+    const script = document.createElement("script"); script.src = "https://v8.js-dos.com/latest/js-dos.js"; script.onload = resolve; script.onerror = reject; document.head.append(script);
+  });
+  try { await jsDosScript; host.replaceChildren(); host.dataset.bundle = state.bundleUrl; window.Dos(host, { url: state.bundleUrl }); }
+  catch { error.value = "JS-DOS could not load. Check the bundle URL and browser network access."; }
+}
+function applyVoiceActivityState(state) { activitySession.value = state; if (state?.kind === "jsdos") void mountJsDosActivity(state); }
 let networkTimer;
 let mediaClockTimer;
 const networkBaseline = new Map();
@@ -3526,6 +3553,7 @@ socket.on("voice:message:created", (message) => {
     voiceMessages.value.push(message);
 });
 socket.on("voice:media:state", (state) => applySharedMediaState(state));
+socket.on("voice:activity:state", (state) => applyVoiceActivityState(state));
 socket.on("message:reactions", ({ channelId, messageId, reactions } = {}) => {
   if (String(channelId) !== String(selected.value?.id)) return;
   messageReactions.value = { ...messageReactions.value, [messageId]: Array.isArray(reactions) ? reactions : [] };
@@ -4316,6 +4344,11 @@ watch(
           </footer>
           <span class="voice-name"><FontAwesomeIcon :icon="mediaSession.kind === 'audio' || mediaSession.kind === 'soundcloud' ? faMusic : faFilm" /> {{ mediaSession.title || 'Shared media' }} · {{ mediaSession.updatedByName || 'Voice channel' }}</span>
         </article>
+        <article v-if="activitySession" class="voice-participant-tile screen-share-tile screen-tile voice-activity-tile" :class="{ focused: focusedVoiceParticipant === '__activity__' }" @click="focusedVoiceParticipant = focusedVoiceParticipant === '__activity__' ? null : '__activity__'">
+          <button class="shared-media-focus" type="button" :title="focusedVoiceParticipant === '__activity__' ? 'Back to grid' : 'Focus activity'" @click.stop="focusedVoiceParticipant = focusedVoiceParticipant === '__activity__' ? null : '__activity__'"><FontAwesomeIcon :icon="faDisplay" /></button>
+          <div v-if="activitySession.kind === 'jsdos'" ref="jsDosContainer" class="jsdos-activity-stage"></div>
+          <footer @click.stop><strong>{{ activitySession.title }}</strong><small>Started by {{ activitySession.updatedByName }} · each participant runs the same bundle locally</small><button @click="closeActivity">Close activity</button></footer>
+        </article>
         <button v-if="!focusedVoiceParticipant && selected?.id === voiceRoom.__channelId" class="voice-invite-tile" type="button" @click="openGuildSettings('invites')">
           <span>＋</span><strong>Invite someone</strong><small>Share this room with friends</small>
         </button>
@@ -4343,6 +4376,7 @@ watch(
         <button :title="voiceRoom.localParticipant.isCameraEnabled ? 'Camera off' : 'Camera'" aria-label="Camera" data-label="Camera" @click="toggleCamera"><FontAwesomeIcon :icon="faCamera" /></button>
         <button title="Share screen" aria-label="Share screen" data-label="Share" @click="toggleScreenShare"><FontAwesomeIcon :icon="faDisplay" /></button>
         <button title="Shared media" aria-label="Shared media" data-label="Media" @click="startMediaBrowser"><FontAwesomeIcon :icon="faDisplay" /></button>
+        <div class="voice-activity-menu-wrap"><button title="Activities" aria-label="Activities" data-label="Activities" @click="startActivities"><FontAwesomeIcon :icon="faPlus" /></button><div v-if="activityMenuOpen" class="voice-activity-menu"><strong>Activities</strong><button @click="launchJsDosActivity"><span>⌘</span><div><b>JS-DOS</b><small>Launch a shared DOS or Windows bundle</small></div></button><button disabled><span>🎮</span><div><b>Games</b><small>More activities coming soon</small></div></button></div></div>
         <button :title="voicePanelOpen ? 'Hide chat' : 'Side chat'" :aria-label="voicePanelOpen ? 'Hide chat' : 'Side chat'" data-label="Chat" @click="voicePanelOpen = !voicePanelOpen"><FontAwesomeIcon :icon="faComments" /></button>
         <button title="Network diagnostics" aria-label="Network diagnostics" data-label="Network" @click="networkPanelOpen = !networkPanelOpen; refreshNetworkStats()"><FontAwesomeIcon :icon="faChartSimple" /></button>
         <button class="hangup" title="Leave voice" aria-label="Leave voice" data-label="Disconnect" @click="leaveVoice"><FontAwesomeIcon :icon="faPhoneSlash" /></button>

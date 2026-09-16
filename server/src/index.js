@@ -18,6 +18,9 @@ import { toggleMessageReaction } from "./reactions.js";
 const port = Number(process.env.PORT || 3002);
 // Voice media sessions are ephemeral; this process is the authoritative clock.
 const voiceMediaSessions = new Map();
+// Activities are lightweight room state. Each browser runs its own client,
+// while this server keeps the selected activity and bundle consistent.
+const voiceActivitySessions = new Map();
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const allowAnyClientOrigin = allowedOrigins.includes("*");
@@ -120,6 +123,8 @@ io.on("connection", (socket) => {
       socket.join(`voice-chat:${channelId}`);
       const media = voiceMediaSessions.get(channelId);
       if (media) socket.emit("voice:media:state", media);
+      const activity = voiceActivitySessions.get(channelId);
+      if (activity) socket.emit("voice:activity:state", activity);
     }
   });
   socket.on("voice-chat:leave", (id) => socket.leave(`voice-chat:${String(id || "")}`));
@@ -162,6 +167,27 @@ io.on("connection", (socket) => {
     } else return ack({ ok: false, error: "Unsupported media action" });
     voiceMediaSessions.set(channelId, state);
     io.to(`voice-chat:${channelId}`).emit("voice:media:state", state);
+    ack({ ok: true, state });
+  });
+  socket.on("voice:activity:update", (input, ack = () => {}) => {
+    const channelId = String(input?.channelId || "");
+    if (!channelExists(channelId, "voice") || !userCanConnectToChannel(channelId, socket.user.id))
+      return ack({ ok: false, error: "Voice channel access required" });
+    const action = String(input?.action || "");
+    if (action === "close") {
+      voiceActivitySessions.delete(channelId);
+      io.to(`voice-chat:${channelId}`).emit("voice:activity:state", null);
+      return ack({ ok: true });
+    }
+    if (action !== "launch" || input?.kind !== "jsdos") return ack({ ok: false, error: "Unsupported activity" });
+    const bundleUrl = String(input?.bundleUrl || "").trim().slice(0, 2048);
+    try {
+      const parsed = new URL(bundleUrl);
+      if (!/^https?:$/.test(parsed.protocol) || !/\.jsdos(?:$|[?#])/i.test(parsed.pathname)) throw new Error();
+    } catch { return ack({ ok: false, error: "Use an HTTPS or HTTP .jsdos bundle URL" }); }
+    const state = { kind: "jsdos", bundleUrl, title: String(input?.title || "JS-DOS").trim().slice(0, 160), updatedBy: socket.user.id, updatedByName: socket.user.display_name, updatedAt: Date.now() };
+    voiceActivitySessions.set(channelId, state);
+    io.to(`voice-chat:${channelId}`).emit("voice:activity:state", state);
     ack({ ok: true, state });
   });
   socket.on("message:create", (input, ack = () => {}) => {
