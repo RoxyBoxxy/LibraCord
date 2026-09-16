@@ -238,10 +238,13 @@ export async function deliverFederationOutbox() {
 
 function identityFromPayload(payload, origin) {
   const value = payload?.identity || payload;
-  const remoteUserId = String(value.id || "");
+  const globalId = String(value.global_id || "");
+  const separator = globalId.lastIndexOf("#");
+  const identityOrigin = String(value.origin || (separator > 0 ? globalId.slice(separator + 1) : origin) || "").toLowerCase();
+  const remoteUserId = String(value.id || (separator > 0 ? globalId.slice(0, separator) : ""));
   if (!remoteUserId) throw new Error("Remote identity is missing an id");
   return {
-    globalId: `${remoteUserId}#${origin}`, origin, remoteUserId,
+    globalId: `${remoteUserId}#${identityOrigin}`, origin: identityOrigin, remoteUserId,
     username: String(value.username || "remote-user").slice(0, 64),
     displayName: String(value.display_name || value.username || "Remote user").slice(0, 80),
     avatarUrl: String(value.avatar_url || "").slice(0, 2048), bannerUrl: String(value.banner_url || "").slice(0, 2048),
@@ -249,6 +252,13 @@ function identityFromPayload(payload, origin) {
     keyFingerprint: value.dm_public_key ? createHash("sha256").update(value.dm_public_key).digest("base64url") : "",
     profile: value.profile || {}, verifiedAt: new Date().toISOString(),
   };
+}
+
+function saveCommunitySnapshot(snapshot, origin, sequence) {
+  for (const member of snapshot?.member_identities || []) {
+    try { saveRemoteIdentity(identityFromPayload(member, origin)); } catch { /* optional profile entry is malformed */ }
+  }
+  return saveRemoteCommunity(snapshot, origin, sequence);
 }
 
 export async function processIncomingEnvelope(envelope) {
@@ -267,7 +277,7 @@ export async function processIncomingEnvelope(envelope) {
         publicKey: identity.publicKey, fingerprint: identity.keyFingerprint, status: "unverified" });
     }
     else if (envelope.type === "community.snapshot") {
-      const community = saveRemoteCommunity(envelope.payload, envelope.origin, envelope.sequence);
+      const community = saveCommunitySnapshot(envelope.payload, envelope.origin, envelope.sequence);
       federationEvents.emit("remote-community:changed", { communityGlobalId: community.global_id });
     }
     else if (envelope.type === "community.delete") {
@@ -286,17 +296,29 @@ export async function processIncomingEnvelope(envelope) {
       const communityGlobalId = `${community.id}#${federationDomain()}`;
       saveRemoteMembership(communityGlobalId, identity.globalId, "joined", []);
       await queueFederationEvent({ destination: envelope.origin, type: "membership.upsert", entityId: `${communityGlobalId}:${identity.globalId}`,
-        payload: { community_global_id: communityGlobalId, user_global_id: identity.globalId, status: "joined", roles: [], snapshot: communityFederationSnapshot(community.id, federationDomain()) } });
+        payload: { community_global_id: communityGlobalId, user_global_id: identity.globalId, status: "joined", roles: [], joined_at: new Date().toISOString(), snapshot: communityFederationSnapshot(community.id, federationDomain()) } });
       federationEvents.emit("community:changed", { communityId: community.id });
     } else if (envelope.type === "membership.upsert") {
       const p = envelope.payload;
-      if (p.snapshot) saveRemoteCommunity(p.snapshot, envelope.origin, envelope.sequence);
-      saveRemoteMembership(p.community_global_id, p.user_global_id, p.status, p.roles || []);
+      if (p.snapshot) saveCommunitySnapshot(p.snapshot, envelope.origin, envelope.sequence);
+      saveRemoteMembership(p.community_global_id, p.user_global_id, p.status, p.roles || [], p.joined_at || null);
       federationEvents.emit("membership:changed", p);
     } else if (["role.upsert","permission.upsert","ban.upsert","moderation.action"].includes(envelope.type)) {
       // Fine-grained moderation events carry the authoritative community snapshot
       // so an offline receiver can atomically converge to the same revision.
-      if (envelope.payload?.snapshot) saveRemoteCommunity(envelope.payload.snapshot, envelope.origin, envelope.sequence);
+      if (envelope.payload?.snapshot) saveCommunitySnapshot(envelope.payload.snapshot, envelope.origin, envelope.sequence);
+    } else if (envelope.type === "channel.message.create") {
+      const p = envelope.payload || {};
+      if (!p.channel_id || !p.message?.id) throw new Error("Invalid channel message event");
+      federationEvents.emit("remote-channel:message", p);
+    } else if (envelope.type === "channel.message.delete") {
+      const p = envelope.payload || {};
+      if (!p.channel_id || !p.message_id) throw new Error("Invalid channel deletion event");
+      federationEvents.emit("remote-channel:deleted", p);
+    } else if (envelope.type === "channel.message.reactions") {
+      const p = envelope.payload || {};
+      if (!p.channel_id || !p.message_id || !Array.isArray(p.reactions)) throw new Error("Invalid channel reaction event");
+      federationEvents.emit("remote-channel:reactions", p);
     } else if (envelope.type === "dm.encrypted") {
       const message = envelope.payload;
       if (!message?.ciphertext || String(message.ciphertext).length > 256_000) throw new Error("Invalid encrypted message");
@@ -329,7 +351,7 @@ export async function createRemoteJoin(user, address) {
   const snapshot = (await response.json()).community;
   if (!snapshot?.id) throw new Error("Remote returned an invalid community");
   if (snapshot.profile?.accessMode === "invite") throw new Error("This community is invite only");
-  saveRemoteCommunity(snapshot, destination.toLowerCase(), 0);
+  saveCommunitySnapshot(snapshot, destination.toLowerCase(), 0);
   const globalUserId = `${user.id}#${federationDomain()}`;
   const communityGlobalId = snapshot.global_id || `${snapshot.id}#${destination.toLowerCase()}`;
   const publicOrigin = String(process.env.PUBLIC_URL || `http://${federationDomain()}`).replace(/\/$/, "");
@@ -342,7 +364,10 @@ export async function createRemoteJoin(user, address) {
     payload: { community_id: snapshot.id, community_address: address, identity: {
       id: user.id, username: user.username, display_name: user.display_name, avatar_url: portableAsset(user.avatar_url),
       banner_url: portableAsset(user.banner_url), dm_public_key: identity?.dm_public_key || "",
-      profile: { bio: identity?.bio || "", accent_color: identity?.accent_color || "#7857ff", server_tag: identity?.server_tag || "", server_tag_emoji: identity?.server_tag_emoji || "", profile_background: identitySettings.profileBackground || "#21152c", profile_background_image: identitySettings.profileBackgroundImage || "" },
+      profile: { bio: identity?.bio || "", accent_color: identity?.accent_color || "#7857ff", server_tag: identity?.server_tag || "", server_tag_emoji: identity?.server_tag_emoji || "", profile_css: identity?.profile_css || "",
+        status: identitySettings.status || "online", status_text: identitySettings.statusText || "", decoration_id: identitySettings.selectedDecorationId || "", profile_theme_id: identitySettings.selectedProfileThemeId || "",
+        username_style_ids: Array.isArray(identitySettings.selectedUsernameStyleIds) ? identitySettings.selectedUsernameStyleIds : [], server_tag_selection: identitySettings.serverTag || null,
+        profile_background: identitySettings.profileBackground || "#21152c", profile_background_image: identitySettings.profileBackgroundImage || "" },
     } } });
 }
 

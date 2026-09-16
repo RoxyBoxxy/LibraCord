@@ -747,7 +747,7 @@ async function beginSession(nextUser) {
   }
   const activeSessionGuild = communities.value.find((guild) => guild.id === activeCommunityId.value);
   if (activeSessionGuild?.remote) {
-    guildMembers.value = [];
+    guildMembers.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeSessionGuild.id)}/members`)).members || [];
     guildRoles.value = activeSessionGuild.roles || [];
     guildCategories.value = activeSessionGuild.categories || [];
   } else {
@@ -1009,7 +1009,7 @@ function isRemoteCommunity(community = activeCommunity.value) {
 async function selectChannel(channel, { updateUrl = true } = {}) {
   page.value = "chat";
   mobileNavOpen.value = false;
-  if (selected.value) socket.emit("channel:leave", selected.value.id);
+  if (selected.value) { socket.emit("channel:leave", selected.value.id); socket.emit("remote-channel:leave", selected.value.id); }
   // Voice is independent from the currently browsed community/channel. Keep
   // the LiveKit room alive when navigating to text or another community;
   // explicitly selecting a different voice channel is the one exception.
@@ -1036,6 +1036,7 @@ async function selectChannel(channel, { updateUrl = true } = {}) {
   }
   const remoteChannel = isRemoteCommunity();
   if (!remoteChannel) socket.emit("channel:join", channel.id);
+  else socket.emit("remote-channel:join", channel.id);
   const loadMessages = async () => {
     const nextMessages = (await api(`/api/v1/channels/${channel.id}/messages`)).messages || [];
     if (messages.value.length !== nextMessages.length || messages.value.at(-1)?.id !== nextMessages.at(-1)?.id)
@@ -1087,11 +1088,16 @@ async function uploadMessageAttachment(event) {
     pendingAttachments.value.push(payload.attachment);
   } catch (e) { error.value = e.message; }
 }
-function reactToMessage(message, emoji = "❤️") {
+async function reactToMessage(message, emoji = "❤️") {
   const current = messageReactions.value[message.id] || [];
   const next = current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji];
   messageReactions.value = { ...messageReactions.value, [message.id]: next };
-  socket.emit("message:reaction", { channelId: message.channel_id || selected.value?.id, messageId: message.id, emoji });
+  if (isRemoteCommunity()) {
+    try {
+      const result = await api(`/api/v1/channels/${selected.value?.id}/messages/${message.id}/reactions`, { method: "POST", body: JSON.stringify({ emoji }) });
+      messageReactions.value = { ...messageReactions.value, [message.id]: result.reactions || next };
+    } catch (e) { messageReactions.value = { ...messageReactions.value, [message.id]: current }; error.value = e.message; }
+  } else socket.emit("message:reaction", { channelId: message.channel_id || selected.value?.id, messageId: message.id, emoji });
 }
 function reactionCustomEmoji(reaction) {
   const match = String(reaction || "").match(/^:([^:]+):$/);
@@ -1609,17 +1615,20 @@ function isFirstRoleMember(member, index, list = guildMembers.value) {
   const role = primaryMemberRole(member)?.id || "__online";
   return list.findIndex((item) => (primaryMemberRole(item)?.id || "__online") === role) === index;
 }
+function userMenuHasRole(role) {
+  const member = guildMembers.value.find((item) => String(item.id) === String(userMenu.value?.id));
+  return (member?.roles || []).some((item) => String(item?.id || item) === String(role.id));
+}
 async function toggleMemberRole(role) {
   const targetId = userMenu.value?.id;
   if (!targetId || !activeCommunity.value) return;
   const member = guildMembers.value.find((item) => item.id === targetId);
-  const ids = new Set((member?.roles || []).map((item) => item.id));
+  const ids = new Set((member?.roles || []).map((item) => item?.id || item));
   ids.has(role.id) ? ids.delete(role.id) : ids.add(role.id);
   try {
     const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/members/${encodeURIComponent(targetId)}/roles`, { method: "PUT", body: JSON.stringify({ roleIds: [...ids] }) });
     if (member) member.roles = (guildRoles.value || []).filter((item) => result.role_ids.includes(item.id));
     emitCommunityChanged(activeCommunity.value.id);
-    userMenu.value = null;
   } catch (e) { error.value = e.message; }
 }
 const filteredShareSources = computed(() => {
@@ -2240,7 +2249,7 @@ async function chooseGuild(guild, { channelId = "", updateUrl = true } = {}) {
   page.value = "chat";
   activeCommunityId.value = guild.id;
   if (guild.remote) {
-    guildMembers.value = [];
+    guildMembers.value = (await api(`/api/v1/guilds/${encodeURIComponent(guild.id)}/members`)).members || [];
     guildRoles.value = guild.roles || [];
     guildCategories.value = guild.categories || [];
     guildEmojis.value = guild.guild_emojis || (await api(`/api/v1/emojis?guildId=${encodeURIComponent(guild.id)}`)).guild_emojis || [];
@@ -3106,7 +3115,7 @@ function showUserMenu(event, subject) {
   channelMenu.value = null;
   appMenu.value = null;
   userMenu.value = {
-    id: subject.id || subject.author_id,
+    id: subject.author_id || subject.id,
     name: subject.username || subject.author_name,
     voiceSid: subject.voiceSid || null,
     voiceVolume: subject.voiceSid ? Number(voiceUserVolumes.value[subject.voiceSid] ?? 100) : null,
@@ -3139,8 +3148,23 @@ function mentionUser() {
   userMenu.value = null;
   activeProfile.value = null;
 }
+function canDeleteMessage(message) {
+  return message?.author_id === user.value?.id || (!isRemoteCommunity() && isAdmin.value);
+}
 function editMessageFromMenu() { const message = messages.value.find((item) => Number(item.id) === Number(userMenu.value?.messageId)); const body = window.prompt("Edit message", message?.body || ""); if (body?.trim()) socket.emit("message:edit", { messageId: message.id, body: body.trim() }); userMenu.value = null; }
-function deleteMessageFromMenu() { if (window.confirm("Delete this message?")) socket.emit("message:delete", { messageId: userMenu.value?.messageId }); userMenu.value = null; }
+async function deleteMessage(message = messages.value.find((item) => Number(item.id) === Number(userMenu.value?.messageId))) {
+  if (!message || !canDeleteMessage(message) || !window.confirm(message.author_id === user.value?.id ? "Delete this message?" : "Delete this message as an administrator?")) { userMenu.value = null; return; }
+  try {
+    if (isRemoteCommunity()) {
+      await api(`/api/v1/channels/${encodeURIComponent(selected.value.id)}/messages/${encodeURIComponent(message.id)}`, { method: "DELETE" });
+      Object.assign(message, { body: "", deleted_at: new Date().toISOString() });
+    } else {
+      socket.emit("message:delete", { messageId: message.id }, (result) => { if (!result?.ok) error.value = result?.error || "Message could not be deleted"; });
+    }
+  } catch (cause) { error.value = cause.message; }
+  userMenu.value = null;
+}
+function deleteMessageFromMenu() { void deleteMessage(); }
 async function copyUserId() {
   await navigator.clipboard.writeText(userMenu.value.id);
   userMenu.value = null;
@@ -4045,6 +4069,7 @@ watch(
               >+</button>
             </div>
             <div class="message-actions">
+              <button v-if="canDeleteMessage(message) && !message.deleted_at" type="button" class="danger" @click="deleteMessage(message)">{{ message.author_id === user.id ? 'Delete' : 'Admin delete' }}</button>
               <button type="button" @click="replyTo = message">↩ Reply</button>
             </div>
           </div>
@@ -4837,7 +4862,7 @@ watch(
       <button @click="openProfile(userMenu.id)">Profile</button>
       <button @click="openDm({ id: userMenu.id, display_name: userMenu.name })">Message</button>
       <button @click="mentionUser">Mention</button>
-      <template v-if="userMenu.messageId && userMenu.id === user.id"><div class="context-separator"></div><button @click="editMessageFromMenu">Edit message</button><button class="danger" @click="deleteMessageFromMenu">Delete message</button></template>
+      <template v-if="userMenu.messageId && (userMenu.id === user.id || (!isRemoteCommunity() && isAdmin))"><div class="context-separator"></div><button v-if="userMenu.id === user.id" @click="editMessageFromMenu">Edit message</button><button class="danger" @click="deleteMessageFromMenu">{{ userMenu.id === user.id ? 'Delete message' : 'Admin delete message' }}</button></template>
       <template v-if="userMenu.voiceSid">
         <div class="context-separator"></div>
         <label class="voice-volume-control"><span>Voice volume <output>{{ userMenu.voiceVolume }}%</output></span><input v-model.number="userMenu.voiceVolume" type="range" min="0" max="200" step="1" @input="setVoiceUserVolume(userMenu.voiceSid, userMenu.voiceVolume)" /></label>
@@ -4847,15 +4872,15 @@ watch(
         Edit Per-server Profile
       </button>
       <button disabled title="App integrations are not available yet">Apps <span>›</span></button>
-      <button
-        @click="
-          openGuildSettings('roles');
-          userMenu = null;
-        "
-      >
+      <button @click="userMenu = { ...userMenu, rolesOpen: !userMenu.rolesOpen }">
         Roles <span>›</span>
       </button>
-      <div v-if="guildRoles.length" class="context-role-list"><small>Assign role</small><button v-for="role in guildRoles.filter((item) => !item.managed)" :key="`assign-${role.id}`" @click="toggleMemberRole(role)"><i :style="{ background: role.color }"></i>{{ role.name }}</button></div>
+      <aside v-if="userMenu.rolesOpen && guildRoles.length" class="context-role-submenu">
+        <small>Roles</small>
+        <button v-for="role in guildRoles.filter((item) => !item.managed)" :key="`assign-${role.id}`" @click="toggleMemberRole(role)">
+          <i :style="{ background: role.color }"></i><span>{{ role.name }}</span><b :class="{ checked: userMenuHasRole(role) }">✓</b>
+        </button>
+      </aside>
       <div class="context-separator"></div>
       <button v-if="userMenu.id !== user.id" @click="reportUserFromMenu">Report user</button>
       <button

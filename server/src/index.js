@@ -7,17 +7,17 @@ import { createServer } from "node:http";
 import { Server } from "socket.io";
 import { createApp } from "./app.js";
 import {
-  channelExists, createDirectMessage, createMessage, editMessage, deleteMessage, findMessage, findChannel,
-  getSystemUser, getInstanceSettings, listCommunities, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
+  channelExists, createDirectMessage, createMessage, editMessage, deleteMessage, deleteMessageAsModerator, findMessage, findChannel, createModerationAction,
+  getSystemUser, getInstanceSettings, listCommunities, listRemoteCommunitiesForUser, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
 } from "./db.js";
 import { getUser } from "./auth.js";
 import { deliverFederationOutbox, federationDomain, federationEvents, publishCommunitySnapshot } from "./federation.js";
 import { moderationEvents } from "./moderation-events.js";
+import { toggleMessageReaction } from "./reactions.js";
 
 const port = Number(process.env.PORT || 3002);
 // Voice media sessions are ephemeral; this process is the authoritative clock.
 const voiceMediaSessions = new Map();
-const messageReactions = new Map();
 const allowedOrigins = String(process.env.CLIENT_ORIGIN || "http://localhost:5173")
   .split(",").map((value) => value.trim()).filter(Boolean);
 const allowAnyClientOrigin = allowedOrigins.includes("*");
@@ -77,6 +77,12 @@ io.on("connection", (socket) => {
       socket.join(`channel:${id}`);
   });
   socket.on("channel:leave", (id) => socket.leave(`channel:${id}`));
+  socket.on("remote-channel:join", (id) => {
+    const channelId = String(id || ""), globalUserId = `${socket.user.id}#${federationDomain()}`;
+    const allowed = listRemoteCommunitiesForUser(globalUserId).some((remote) => remote.status === "joined" && (remote.state?.channels || []).some((channel) => String(channel.id) === channelId));
+    if (allowed) socket.join(`remote-channel:${channelId}`);
+  });
+  socket.on("remote-channel:leave", (id) => socket.leave(`remote-channel:${String(id || "")}`));
   socket.on("typing:start", (id) => {
     if (channelExists(id, "text") && userCanSendToChannel(id, socket.user.id))
       socket.to(`channel:${id}`).emit("typing:update", {
@@ -89,10 +95,7 @@ io.on("connection", (socket) => {
   socket.on("message:reaction", (input, ack = () => {}) => {
     const channelId = String(input?.channelId || ""), messageId = String(input?.messageId || ""), emoji = String(input?.emoji || "").slice(0, 64);
     if (!channelExists(channelId, "text") || !userCanAccessChannel(channelId, socket.user.id) || !messageId || !emoji) return ack({ ok: false, error: "Invalid reaction" });
-    const key = `${channelId}:${messageId}`;
-    const current = messageReactions.get(key) || [];
-    const next = current.includes(emoji) ? current.filter((item) => item !== emoji) : [...current, emoji].slice(-50);
-    messageReactions.set(key, next);
+    const next = toggleMessageReaction(channelId, messageId, emoji);
     io.to(`channel:${channelId}`).emit("message:reactions", { channelId, messageId, reactions: next });
     ack({ ok: true, reactions: next });
   });
@@ -175,7 +178,16 @@ io.on("connection", (socket) => {
   socket.on("message:delete", (input, ack = () => {}) => {
     const messageId = Number(input?.messageId); if (!messageId) return ack({ ok: false, error: "Invalid message" });
     const message = findMessage(messageId);
-    if (!message || !deleteMessage(messageId, socket.user.id)) return ack({ ok: false, error: "Message not found or not owned by you" });
+    if (!message) return ack({ ok: false, error: "Message not found" });
+    const moderator = ["owner", "admin"].includes(socket.user.role);
+    const deleted = message.author_id === socket.user.id
+      ? deleteMessage(messageId, socket.user.id)
+      : moderator && deleteMessageAsModerator(messageId);
+    if (!deleted) return ack({ ok: false, error: moderator ? "Message was already deleted" : "You can only delete your own messages" });
+    if (moderator && message.author_id !== socket.user.id) {
+      const channel = findChannel(message.channel_id);
+      if (channel) createModerationAction(channel.community_id, "message.delete", message.author_id, "Deleted by instance administrator", socket.user.id, { message_id: messageId, channel_id: message.channel_id });
+    }
     io.to(`channel-notify:${message.channel_id}`).emit("message:deleted", { messageId }); ack({ ok: true });
   });
   socket.on("community:changed", (payload) => {
@@ -240,6 +252,9 @@ federationEvents.on("community:deleted", ({ communityGlobalId }) =>
   io.emit("federation:community-deleted", { communityGlobalId }));
 federationEvents.on("remote-community:changed", ({ communityGlobalId }) =>
   io.emit("federation:community-changed", { communityGlobalId }));
+federationEvents.on("remote-channel:message", ({ channel_id, message }) => io.to(`remote-channel:${channel_id}`).emit("message:created", message));
+federationEvents.on("remote-channel:deleted", ({ channel_id, message_id }) => io.to(`remote-channel:${channel_id}`).emit("message:deleted", { channelId: channel_id, messageId: message_id }));
+federationEvents.on("remote-channel:reactions", ({ channel_id, message_id, reactions }) => io.to(`remote-channel:${channel_id}`).emit("message:reactions", { channelId: channel_id, messageId: message_id, reactions }));
 moderationEvents.on("system-message", ({ recipientId, message }) => {
   io.to(`user:${recipientId}`).emit("dm:created", message);
 });

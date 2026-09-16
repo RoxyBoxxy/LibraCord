@@ -343,7 +343,8 @@ export function createMessage({ channelId, authorId, authorName, body, attachmen
 }
 export function editMessage(id, authorId, body) { const now = new Date().toISOString(); const changed = db.prepare("UPDATE messages SET body=?,edited_at=? WHERE id=? AND author_id=? AND deleted_at IS NULL").run(encryptMessageValue(body), now, id, authorId).changes; return changed ? db.prepare("SELECT * FROM messages WHERE id=?").get(id) : null; }
 export function deleteMessage(id, authorId) { const now = new Date().toISOString(); const changed = db.prepare("UPDATE messages SET body='',deleted_at=? WHERE id=? AND author_id=? AND deleted_at IS NULL").run(now, id, authorId).changes; return changed > 0; }
-export function findMessage(id) { return db.prepare("SELECT id,channel_id FROM messages WHERE id=?").get(id); }
+export function deleteMessageAsModerator(id) { const now = new Date().toISOString(); return db.prepare("UPDATE messages SET body='',deleted_at=? WHERE id=? AND deleted_at IS NULL").run(now, id).changes > 0; }
+export function findMessage(id) { return db.prepare("SELECT id,channel_id,author_id,author_name,body,deleted_at FROM messages WHERE id=?").get(id); }
 
 export function countUsers() {
   return db.prepare("SELECT COUNT(*) AS count FROM users WHERE id<>'00000000-0000-4000-8000-000000000001'").get().count;
@@ -688,9 +689,15 @@ export function listGuildMembers(guildId) {
   const globalCommunityId = `${guildId}#${federationDomainForDb()}`;
   const rolesById = new Map(listGuildRoles(guildId).map((role) => [role.id, role]));
   const remote = db.prepare(`SELECT i.global_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,
-    COALESCE(json_extract(i.profile,'$.server_tag_selection'),'') AS server_tag_selection,
+    COALESCE(json_extract(i.profile,'$.bio'),'') AS bio,
+    COALESCE(json_extract(i.profile,'$.profile_css'),'') AS profile_css,
+    COALESCE(json_extract(i.profile,'$.server_tag_selection'),json_extract(i.profile,'$.serverTag'),'') AS server_tag_selection,
     COALESCE(json_extract(i.profile,'$.accent_color'),'#62efc6') AS accent_color,'remote' AS role,
-    'online' AS presence_status,'' AS status_text,'' AS decoration_id,'' AS profile_theme_id,'[]' AS username_style_ids,
+    COALESCE(json_extract(i.profile,'$.status'),'online') AS presence_status,
+    COALESCE(json_extract(i.profile,'$.status_text'),json_extract(i.profile,'$.statusText'),'') AS status_text,
+    COALESCE(json_extract(i.profile,'$.decoration_id'),json_extract(i.profile,'$.selectedDecorationId'),'') AS decoration_id,
+    COALESCE(json_extract(i.profile,'$.profile_theme_id'),json_extract(i.profile,'$.selectedProfileThemeId'),'') AS profile_theme_id,
+    COALESCE(json_extract(i.profile,'$.username_style_ids'),json_extract(i.profile,'$.selectedUsernameStyleIds'),'[]') AS username_style_ids,
     NULL AS nickname,m.joined_at,m.roles FROM remote_memberships m JOIN remote_identities i ON i.global_id=m.user_global_id
     WHERE m.community_global_id=? AND m.status='joined' ORDER BY i.display_name`).all(globalCommunityId)
     .map((member) => ({ ...member, remote: true, roles: JSON.parse(member.roles || "[]").map((id) => rolesById.get(id)).filter(Boolean) }));
@@ -1634,7 +1641,17 @@ export function saveRemoteCommunity(snapshot, origin, sequence) {
     icon_url=excluded.icon_url,banner_url=excluded.banner_url,revision=excluded.revision,state=excluded.state,updated_at=excluded.updated_at`).run(
       id, origin, snapshot.id, snapshot.address || id, snapshot.name, snapshot.description || "", snapshot.icon_url || "",
       snapshot.banner_url || "", sequence, JSON.stringify(snapshot), new Date().toISOString());
-  for (const member of snapshot.remote_members || []) saveRemoteMembership(id, member.global_id, member.status || "joined", member.roles || []);
+  for (const member of snapshot.member_identities || []) {
+    const globalId = String(member.global_id || "");
+    const separator = globalId.lastIndexOf("#");
+    const identityOrigin = String(member.origin || (separator > 0 ? globalId.slice(separator + 1) : origin) || "").toLowerCase();
+    const remoteUserId = String(member.id || (separator > 0 ? globalId.slice(0, separator) : ""));
+    if (!remoteUserId || !identityOrigin) continue;
+    saveRemoteIdentity({ globalId: `${remoteUserId}#${identityOrigin}`, origin: identityOrigin, remoteUserId,
+      username: String(member.username || "remote-user").slice(0, 64), displayName: String(member.display_name || member.username || "Remote user").slice(0, 80),
+      avatarUrl: String(member.avatar_url || "").slice(0, 2048), bannerUrl: String(member.banner_url || "").slice(0, 2048), profile: member.profile || {}, verifiedAt: new Date().toISOString() });
+  }
+  for (const member of snapshot.remote_members || []) saveRemoteMembership(id, member.global_id, member.status || "joined", member.roles || [], member.joined_at || null);
   return findRemoteCommunity(id);
 }
 export function findRemoteCommunity(globalId) {
@@ -1649,11 +1666,12 @@ export function listRemoteCommunitiesForUser(globalUserId) {
   return db.prepare(`SELECT c.*,m.status,m.roles FROM remote_memberships m JOIN remote_communities c ON c.global_id=m.community_global_id
     WHERE m.user_global_id=? AND m.status IN ('pending','joined') ORDER BY c.name`).all(globalUserId).map((row) => ({ ...row, state: JSON.parse(row.state || "{}"), roles: JSON.parse(row.roles || "[]") }));
 }
-export function saveRemoteMembership(communityGlobalId, userGlobalId, status, roles = []) {
+export function saveRemoteMembership(communityGlobalId, userGlobalId, status, roles = [], joinedAt = null) {
   const now = new Date().toISOString();
   db.prepare(`INSERT INTO remote_memberships(community_global_id,user_global_id,status,roles,joined_at,updated_at) VALUES(?,?,?,?,?,?)
-    ON CONFLICT(community_global_id,user_global_id) DO UPDATE SET status=excluded.status,roles=excluded.roles,updated_at=excluded.updated_at`)
-    .run(communityGlobalId, userGlobalId, status, JSON.stringify(roles), status === "joined" ? now : null, now);
+    ON CONFLICT(community_global_id,user_global_id) DO UPDATE SET status=excluded.status,roles=excluded.roles,
+    joined_at=COALESCE(excluded.joined_at,remote_memberships.joined_at),updated_at=excluded.updated_at`)
+    .run(communityGlobalId, userGlobalId, status, JSON.stringify(roles), status === "joined" ? (joinedAt || now) : null, now);
 }
 export function remoteMembershipStatus(communityGlobalId, userGlobalId) {
   return db.prepare("SELECT status FROM remote_memberships WHERE community_global_id=? AND user_global_id=?").get(communityGlobalId, userGlobalId)?.status || null;
@@ -1666,6 +1684,25 @@ export function communityFederationSnapshot(guildId, domain) {
   const profile = JSON.parse(community.profile || "{}");
   if (String(profile.atmosphere?.backgroundUrl || "").startsWith("/"))
     profile.atmosphere.backgroundUrl = new URL(profile.atmosphere.backgroundUrl, `${origin}/`).href;
+  const absoluteUrl = (value) => {
+    if (!value) return "";
+    try { return new URL(value, `${origin}/`).href; } catch { return value; }
+  };
+  const localIdentities = db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.bio,u.accent_color,u.server_tag,u.server_tag_emoji,u.profile_css,u.settings,m.joined_at
+    FROM guild_members m JOIN users u ON u.id=m.user_id WHERE m.guild_id=?`).all(guildId).map((member) => {
+    let settings = {}; try { settings = JSON.parse(member.settings || "{}"); } catch {}
+    return { id: member.id, origin: domain, username: member.username, display_name: member.display_name,
+      avatar_url: absoluteUrl(member.avatar_url), banner_url: absoluteUrl(member.banner_url), joined_at: member.joined_at,
+      profile: { bio: member.bio || "", accent_color: member.accent_color || "#7857ff", server_tag: member.server_tag || "", server_tag_emoji: member.server_tag_emoji || "", profile_css: member.profile_css || "",
+        status: settings.status || "online", status_text: settings.statusText || "", decoration_id: settings.selectedDecorationId || "", profile_theme_id: settings.selectedProfileThemeId || "",
+        username_style_ids: Array.isArray(settings.selectedUsernameStyleIds) ? settings.selectedUsernameStyleIds : [], server_tag_selection: settings.serverTag || null,
+        profile_background: settings.profileBackground || "#21152c", profile_background_image: settings.profileBackgroundImage || "" } };
+  });
+  const remoteIdentities = db.prepare(`SELECT i.global_id,i.origin,i.remote_user_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,i.profile,m.joined_at
+    FROM remote_memberships m JOIN remote_identities i ON i.global_id=m.user_global_id WHERE m.community_global_id=? AND m.status='joined'`).all(`${guildId}#${domain}`).map((member) => ({
+    id: member.id, origin: member.origin, username: member.username, display_name: member.display_name, avatar_url: member.avatar_url || "", banner_url: member.banner_url || "", joined_at: member.joined_at,
+    profile: JSON.parse(member.profile || "{}"),
+  }));
   return {
     id: community.id, global_id: `${community.id}#${domain}`, address: `${community.name.toLowerCase().replace(/[^a-z0-9]+/g,"-")}#${domain}`,
     name: community.name, description: community.description, icon_url: asset(community.icon_asset_id), banner_url: asset(community.banner_asset_id),
@@ -1675,6 +1712,7 @@ export function communityFederationSnapshot(guildId, domain) {
     // absolute so a federated client can load the asset from its owner.
     guild_emojis: listGuildEmojis(guildId).map((emoji) => ({ ...emoji, url: `${origin}/api/v1/assets/${emoji.asset_id}` })),
     guild_stickers: listGuildStickers(guildId).map((sticker) => ({ ...sticker, url: `${origin}/api/v1/assets/${sticker.asset_id}` })),
+    member_identities: [...localIdentities, ...remoteIdentities],
     permission_overrides: listPermissionOverrides(guildId),
     members: db.prepare("SELECT guild_id,user_id,nickname,joined_at FROM guild_members WHERE guild_id=?").all(guildId),
     member_roles: db.prepare("SELECT guild_id,user_id,role_id FROM member_roles WHERE guild_id=?").all(guildId),

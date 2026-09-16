@@ -29,6 +29,8 @@ import {
   createChannel,
   createCommunity,
   createMessage,
+  deleteMessage,
+  findMessage,
   getInstanceSettings,
   listUsers,
   saveInstanceSettings,
@@ -88,8 +90,8 @@ import {
   listFriends, sendFriendRequest, listFriendRequests, acceptFriendRequest, removeFriend,
   listRemoteCommunitiesForUser, remoteMembershipStatus, listFederatedDms, findRemoteIdentity,
   findFederatedDmKey, listPeerPolicies, savePeerPolicy, createAbuseReport, listAbuseReports,
-  communityFederationSnapshot,
-  findPeerByDomain, saveRemoteIdentity,
+  communityFederationSnapshot, listPeerDomainsForCommunity,
+  findPeerByDomain, saveRemoteIdentity, saveRemoteCommunity,
   findCommunityByReference, listGuildBans, banGuildActor, unbanGuildActor, listModerationActions,
   listDirectMessageContacts, getSystemUser, createSystemDirectMessage,
   banInstanceUser, unbanInstanceUser, listInstanceBans, createInstanceReport,
@@ -103,9 +105,10 @@ import { checkBrowserNavigation } from "./plugins/browser-policy.js";
 import { moderationEvents } from "./moderation-events.js";
 import {
   canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope, signEnvelope,
-  publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
+  federationEvents, publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
   syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
 } from "./federation.js";
+import { toggleMessageReaction } from "./reactions.js";
 import { Permissions, hasPermission, requireGuildPermission } from "./permissions.js";
 
 const execFileAsync = promisify(execFile);
@@ -251,6 +254,7 @@ const publicProfile = (user) => {
     status_text: profileSettings.statusText || "",
     decoration_id: profileSettings.selectedDecorationId || "",
     profile_theme_id: profileSettings.selectedProfileThemeId || "",
+    username_style_ids: Array.isArray(profileSettings.selectedUsernameStyleIds) ? profileSettings.selectedUsernameStyleIds : [],
     server_tags: profileSettings.serverTags || {},
     server_tag_selection: profileSettings.serverTag || null,
     profile_background: profileSettings.profileBackground || "#21152c",
@@ -851,7 +855,34 @@ export function createApp() {
           url: federatedAssetUrl(attachment.url),
         })),
       });
+      const publishChannelEvent = (type, entityId, eventPayload) => {
+        const destinations = new Set(listPeerDomainsForCommunity(communityId, federationDomain()));
+        destinations.add(String(req.body.origin || "").toLowerCase());
+        for (const destination of destinations) if (destination)
+          void queueFederationEvent({ destination, type, entityId, payload: eventPayload }).catch(() => {});
+      };
       if (payload.action === "list") return res.json({ messages: listMessages(channelId).map(federatedMessage) });
+      if (payload.action === "delete") {
+        const messageId = Number(payload.message_id);
+        const message = Number.isSafeInteger(messageId) && findMessage(messageId);
+        if (!message || message.channel_id !== channelId) return res.status(404).json({ error: "Message not found" });
+        if (message.author_id !== userGlobalId) return res.status(403).json({ error: "You can only delete your own federated messages" });
+        if (!deleteMessage(messageId, userGlobalId)) return res.status(409).json({ error: "Message was already deleted" });
+        const eventPayload = { channel_id: channelId, message_id: messageId };
+        publishChannelEvent("channel.message.delete", `${channelId}:${messageId}`, eventPayload);
+        federationEvents.emit("remote-channel:deleted", eventPayload);
+        return res.status(204).end();
+      }
+      if (payload.action === "reaction") {
+        const messageId = Number(payload.message_id), emoji = String(payload.emoji || "").slice(0, 64);
+        const message = Number.isSafeInteger(messageId) && findMessage(messageId);
+        if (!message || message.channel_id !== channelId || !emoji) return res.status(400).json({ error: "Invalid reaction" });
+        const reactions = toggleMessageReaction(channelId, messageId, emoji);
+        const eventPayload = { channel_id: channelId, message_id: messageId, reactions };
+        publishChannelEvent("channel.message.reactions", `${channelId}:${messageId}:reactions`, eventPayload);
+        federationEvents.emit("remote-channel:reactions", eventPayload);
+        return res.json({ reactions });
+      }
       if (payload.action !== "create") return res.status(400).json({ error: "Unsupported channel action" });
       const body = String(payload.body || "").trim().slice(0, 4000);
       const attachments = Array.isArray(payload.attachments) ? payload.attachments.slice(0, 8) : [];
@@ -865,7 +896,10 @@ export function createApp() {
         contentWarning: String(payload.content_warning || "").trim().slice(0, 120),
         replyTo: payload.reply_to ? Number(payload.reply_to) : null,
       });
-      return res.status(201).json({ message: federatedMessage(message) });
+      const publicMessage = federatedMessage(message);
+      publishChannelEvent("channel.message.create", `${channelId}:${message.id}`, { channel_id: channelId, message: publicMessage });
+      federationEvents.emit("remote-channel:message", { channel_id: channelId, message: publicMessage });
+      return res.status(201).json({ message: publicMessage });
     } catch (error) {
       if (error.status === 429) res.set("retry-after", "60");
       return res.status(error.status || 400).json({ error: error.message });
@@ -1651,23 +1685,50 @@ export function createApp() {
         ? res.status(204).end()
         : res.status(404).json({ error: "Channel not found" }),
   );
-  app.get("/api/v1/guilds/:id/members", requireUser, (req, res) => {
+  app.get("/api/v1/guilds/:id/members", requireUser, async (req, res) => {
     const remote = remoteCommunityFor(req.user.id, req.params.id);
     if (remote) {
+      let remoteState = remote.state || {};
+      // Refresh the public snapshot when the member list is opened. This lets
+      // existing federated memberships converge on profile metadata added by
+      // newer peers without requiring users to leave and rejoin.
+      try {
+        const peer = findPeerByDomain(remote.origin);
+        const response = peer && await federationFetch(peer, `/api/v1/federation/communities/${encodeURIComponent(remote.remote_id)}`, { headers: { accept: "application/json" } });
+        if (response?.ok) {
+          const snapshot = (await response.json()).community;
+          if (snapshot?.id) remoteState = saveRemoteCommunity(snapshot, remote.origin, Number(remote.revision || 0)).state || remoteState;
+        }
+      } catch { /* retain the most recently synchronized snapshot */ }
       const remoteBase = findPeerByDomain(remote.origin)?.base_url || `https://${remote.origin}`;
       const remoteAsset = (value) => {
         if (!value) return "";
         try { return new URL(value, `${String(remoteBase).replace(/\/$/, "")}/`).href; } catch { return value; }
       };
-      const members = (remote.state?.remote_members || []).map((member) => {
-        const identity = findRemoteIdentity(member.global_id);
+      const memberIdentities = Array.isArray(remoteState.member_identities) && remoteState.member_identities.length
+        ? remoteState.member_identities
+        : (remoteState.remote_members || []).map((member) => ({ global_id: member.global_id, joined_at: member.joined_at, roles: member.roles || [] }));
+      const members = memberIdentities.map((member) => {
+        const globalId = member.global_id || `${member.id}#${member.origin || remote.origin}`;
+        const identity = findRemoteIdentity(globalId);
+        const profile = member.profile || identity?.profile || {};
         return {
-          id: member.global_id,
-          user_id: member.global_id,
-          username: identity?.username || member.global_id,
-          display_name: identity?.display_name || identity?.username || member.global_id,
-          avatar_url: remoteAsset(identity?.avatar_url),
-          banner_url: remoteAsset(identity?.banner_url),
+          id: globalId,
+          user_id: globalId,
+          username: member.username || identity?.username || globalId,
+          display_name: member.display_name || identity?.display_name || identity?.username || globalId,
+          avatar_url: remoteAsset(member.avatar_url || identity?.avatar_url),
+          banner_url: remoteAsset(member.banner_url || identity?.banner_url),
+          bio: profile.bio || "",
+          accent_color: profile.accent_color || "#62efc6",
+          profile_css: profile.profile_css || "",
+          server_tag_selection: profile.server_tag_selection || profile.serverTag || null,
+          presence_status: profile.status || "online",
+          status_text: profile.status_text || profile.statusText || "",
+          decoration_id: profile.decoration_id || profile.selectedDecorationId || "",
+          profile_theme_id: profile.profile_theme_id || profile.selectedProfileThemeId || "",
+          username_style_ids: profile.username_style_ids || profile.selectedUsernameStyleIds || [],
+          joined_at: member.joined_at || null,
           remote: true,
           roles: member.roles || [],
         };
@@ -1941,6 +2002,20 @@ export function createApp() {
         body, attachments, contentWarning, replyTo,
       }),
     });
+  });
+  app.delete("/api/v1/channels/:id/messages/:messageId", requireUser, async (req, res, next) => {
+    if (channelExists(req.params.id, "text")) return res.status(405).json({ error: "Use the live channel connection to delete local messages" });
+    try {
+      const remote = await requestRemoteChannel(req, req.params.id, "delete", { message_id: Number(req.params.messageId) });
+      return remote !== null ? res.status(204).end() : res.status(404).json({ error: "Text channel not found" });
+    } catch (error) { return next(error); }
+  });
+  app.post("/api/v1/channels/:id/messages/:messageId/reactions", requireUser, async (req, res, next) => {
+    if (channelExists(req.params.id, "text")) return res.status(405).json({ error: "Use the live channel connection for local reactions" });
+    try {
+      const remote = await requestRemoteChannel(req, req.params.id, "reaction", { message_id: Number(req.params.messageId), emoji: String(req.body?.emoji || "").slice(0, 64) });
+      return remote !== null ? res.json(remote) : res.status(404).json({ error: "Text channel not found" });
+    } catch (error) { return next(error); }
   });
   app.post("/api/v1/channels/:id/attachments", requireUser, (req, res) => {
     const remote = remoteChannelFor(req.user.id, req.params.id);
