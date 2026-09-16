@@ -4992,7 +4992,7 @@ watch(
         </span>
         <div>
           <strong :style="usernameThemeStyle(member)">{{ member.nickname || member.display_name }} <span v-if="memberTagFor(member)?.text" class="community-member-tag"><i>{{ memberTagFor(member).emoji }}</i>{{ memberTagFor(member).text }}</span></strong>
-          <span v-if="member.roles?.length" class="member-role-chips"><i v-for="role in member.roles" :key="role.id" :style="{ color: role.color }">{{ role.name }}</i></span>
+          <span v-if="primaryMemberRole(member)" class="member-role-chips"><i :style="{ color: primaryMemberRole(member).color }">{{ primaryMemberRole(member).name }}</i></span>
           <small>{{
             member.status_text || `${member.username}@${user.home_server}`
           }}</small>
