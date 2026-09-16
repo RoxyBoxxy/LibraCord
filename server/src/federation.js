@@ -33,6 +33,7 @@ import {
   queueFederationOutbox,
   recordPeerVerification,
   removeRemoteCommunity,
+  removeGuildMember,
   saveFederatedDm,
   saveFederatedDmKey,
   saveFederationEvent,
@@ -324,6 +325,18 @@ export async function processIncomingEnvelope(envelope) {
       await queueFederationEvent({ destination: envelope.origin, type: "membership.upsert", entityId: `${communityGlobalId}:${identity.globalId}`,
         payload: { community_global_id: communityGlobalId, user_global_id: identity.globalId, status: "joined", roles: [], joined_at: new Date().toISOString(), snapshot: communityFederationSnapshot(community.id, federationDomain()) } });
       federationEvents.emit("community:changed", { communityId: community.id });
+    } else if (envelope.type === "membership.leave.request") {
+      const community = findCommunity(String(envelope.payload?.community_id || ""));
+      const userGlobalId = String(envelope.payload?.user_global_id || "");
+      // A peer may only remove one of its own users. This prevents an allowed
+      // peer from forging a leave request for somebody on another instance.
+      if (!community) throw new Error("Community not found");
+      if (!userGlobalId.endsWith(`#${envelope.origin}`)) throw new Error("Leave request identity does not match its origin");
+      removeGuildMember(community.id, userGlobalId);
+      const communityGlobalId = `${community.id}#${federationDomain()}`;
+      await queueFederationEvent({ destination: envelope.origin, type: "membership.upsert", entityId: `${communityGlobalId}:${userGlobalId}`,
+        payload: { community_global_id: communityGlobalId, user_global_id: userGlobalId, status: "left", roles: [], snapshot: communityFederationSnapshot(community.id, federationDomain()) } });
+      federationEvents.emit("community:changed", { communityId: community.id });
     } else if (envelope.type === "membership.upsert") {
       const p = envelope.payload;
       if (p.snapshot) saveCommunitySnapshot(p.snapshot, envelope.origin, envelope.sequence);
@@ -399,6 +412,22 @@ export async function createRemoteJoin(user, address) {
         username_style_ids: Array.isArray(identitySettings.selectedUsernameStyleIds) ? identitySettings.selectedUsernameStyleIds : [], server_tag_selection: identitySettings.serverTag || null,
         profile_background: identitySettings.profileBackground || "#21152c", profile_background_image: identitySettings.profileBackgroundImage || "" },
     } } });
+}
+
+// Leave is a signed request to the community's home instance. Mark the local
+// remote membership as left immediately, then let the authoritative instance
+// remove its matching membership and broadcast the resulting snapshot.
+export async function createRemoteLeave(user, remoteCommunity) {
+  const origin = String(remoteCommunity?.origin || "").toLowerCase();
+  const communityId = String(remoteCommunity?.remote_id || "");
+  const communityGlobalId = String(remoteCommunity?.global_id || "");
+  const peer = findPeerByDomain(origin);
+  if (!peer || peer.status !== "allowed" || !communityId || !communityGlobalId)
+    throw new Error("That remote community is no longer available");
+  const userGlobalId = `${user.id}#${federationDomain()}`;
+  saveRemoteMembership(communityGlobalId, userGlobalId, "left", []);
+  return queueFederationEvent({ peer, type: "membership.leave.request", entityId: `${communityGlobalId}:${userGlobalId}`,
+    payload: { community_id: communityId, community_global_id: communityGlobalId, user_global_id: userGlobalId } });
 }
 
 export function syncEvents(envelope) {

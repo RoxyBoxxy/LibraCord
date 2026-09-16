@@ -236,10 +236,14 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   draggedChannelId = ref(null),
   draggedRoleId = ref(null),
   guildMembers = ref([]),
+  guildBans = ref([]),
   channelMenu = ref(null),
+  channelCreateMenu = ref(null),
   channelSettingsOpen = ref(false),
   channelSettingsTab = ref("overview"),
   channelSettingsForm = ref({}),
+  rolePickerEditor = ref([]),
+  rolePickerAssignedRoles = ref([]),
   channelPermissionOverrides = ref([]),
   channelPermissionTarget = ref("everyone"),
   supportedVoiceCodecs = ref([{ value: "opus", label: "Opus" }]),
@@ -369,9 +373,9 @@ const sidebarChannelGroups = computed(() => {
   ).sort(
     (a, b) => (a.position || 0) - (b.position || 0),
   );
-  const groups = guildCategories.value
+  const groups = [...guildCategories.value].sort((a, b) => (a.position || 0) - (b.position || 0) || a.name.localeCompare(b.name))
     .map((category) => ({ ...category, channels: channels.filter((channel) => channel.category_id === category.id) }))
-    .filter((group) => group.channels.length);
+    ;
   const uncategorized = channels.filter((channel) => !channel.category_id || !guildCategories.value.some((category) => category.id === channel.category_id));
   return uncategorized.length ? [{ id: "uncategorized", name: "Channels", channels: uncategorized }, ...groups] : groups;
 });
@@ -1014,6 +1018,26 @@ async function logout() {
 function isRemoteCommunity(community = activeCommunity.value) {
   return Boolean(community?.remote || String(community?.id || "").includes("#"));
 }
+function isRolePickerChannel(channel = selected.value) { return Boolean(channel?.role_picker_enabled); }
+function rolePickerCategories(channel = selected.value) {
+  const value = channel?.role_picker;
+  if (Array.isArray(value)) return value;
+  try { return JSON.parse(value || "[]"); } catch { return []; }
+}
+async function loadRolePicker(channel = selected.value) {
+  if (!isRolePickerChannel(channel)) return;
+  const result = await api(`/api/v1/channels/${encodeURIComponent(channel.id)}/role-picker`);
+  channel.role_picker = result.categories || [];
+  rolePickerAssignedRoles.value = result.role_ids || [];
+}
+async function toggleRolePickerRole(role) {
+  if (!selected.value || !role) return;
+  try {
+    const result = await api(`/api/v1/channels/${encodeURIComponent(selected.value.id)}/role-picker/roles/${encodeURIComponent(role.id)}`, { method: "POST" });
+    rolePickerAssignedRoles.value = result.role_ids || [];
+    saved.value = rolePickerAssignedRoles.value.map(String).includes(String(role.id)) ? `Added ${role.name}` : `Removed ${role.name}`;
+  } catch (e) { error.value = e.message; }
+}
 async function selectChannel(channel, { updateUrl = true } = {}) {
   page.value = "chat";
   mobileNavOpen.value = false;
@@ -1042,6 +1066,11 @@ async function selectChannel(channel, { updateUrl = true } = {}) {
     }
     return joinVoice(channel);
   }
+  if (isRolePickerChannel(channel)) {
+    messages.value = [];
+    await loadRolePicker(channel);
+    return;
+  }
   const remoteChannel = isRemoteCommunity();
   if (!remoteChannel) socket.emit("channel:join", channel.id);
   else socket.emit("remote-channel:join", channel.id);
@@ -1059,7 +1088,7 @@ async function sendMessage() {
   let body = draft.value.trim();
   if (/^\/shrug(?:\s|$)/i.test(body)) body = `${body.replace(/^\/shrug\s*/i, "").trim()} ${"\u00af\\\\_(\u30c4)_/\u00af"}`.trim();
   else if (/^\/me\s+/i.test(body)) body = `*${body.replace(/^\/me\s+/i, "").trim()}*`;
-  if ((!body && !pendingAttachments.value.length) || !selected.value || selected.value.kind !== "text") return;
+  if ((!body && !pendingAttachments.value.length) || !selected.value || selected.value.kind !== "text" || isRolePickerChannel()) return;
   if (!socket.connected || isRemoteCommunity()) {
     try {
       await api(`/api/v1/channels/${selected.value.id}/messages`, {
@@ -1705,6 +1734,8 @@ const communitySettingsPages = {
   emoji: ["Emoji", "Manage custom expression for this community."],
   safety: ["Safety setup", "Configure moderation and community safety defaults."],
   audit: ["Audit log", "Review important administrative actions."],
+  bans: ["Bans", "Review and revoke community bans."],
+  danger: ["Danger zone", "Leave or permanently delete this community."],
   onboarding: ["Onboarding", "Shape the experience for new community members."],
 };
 const userSettingsPage = computed(() => userSettingsPages[settingsTab.value] || userSettingsPages.profile);
@@ -2445,11 +2476,62 @@ async function joinRemoteCommunity(guild) {
   if (await joinCommunityByAddress(guild.address)) guild.membership_status = "pending";
 }
 async function removeCommunityMember(member) {
-  if (!confirm(`Remove ${member.display_name} from this community?`)) return;
+  if (!confirm(`Kick ${member.display_name} from this community?`)) return;
   await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/members/${encodeURIComponent(member.id)}`, {
     method: "DELETE",
   });
   guildMembers.value = guildMembers.value.filter((entry) => entry.id !== member.id);
+}
+function communityActorId(member) {
+  const id = String(member?.id || member?.user_id || "");
+  return id.includes("#") ? id : `${id}#${user.value?.home_server || location.host}`;
+}
+async function banCommunityMember(member) {
+  const name = member.nickname || member.display_name || member.username;
+  if (!confirm(`Ban ${name} from this community?`)) return;
+  const reason = window.prompt("Ban reason (optional):", "");
+  if (reason === null) return;
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/bans`, {
+    method: "POST", body: JSON.stringify({ actor: communityActorId(member), reason }),
+  });
+  guildMembers.value = guildMembers.value.filter((entry) => entry.id !== member.id);
+  await loadGuildBans();
+}
+async function loadGuildBans() {
+  if (!activeCommunity.value || isRemoteCommunity()) return;
+  const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/bans`);
+  guildBans.value = result.bans || [];
+}
+async function unbanCommunityMember(ban) {
+  if (!confirm(`Remove the ban for ${ban.actor}?`)) return;
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/bans/${encodeURIComponent(ban.actor)}`, { method: "DELETE" });
+  guildBans.value = guildBans.value.filter((item) => item.actor !== ban.actor);
+}
+async function leaveActiveCommunity() {
+  const community = activeCommunity.value;
+  if (!community) return;
+  if (!isRemoteCommunity(community) && community.owner_id === user.value?.id) {
+    error.value = "The server owner cannot leave. Transfer ownership or delete the server instead.";
+    return;
+  }
+  if (!confirm(`Leave ${community.name}?`)) return;
+  await api(`/api/v1/guilds/${encodeURIComponent(community.id)}/members/@me`, { method: "DELETE" });
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
+  guildSettingsDialog.value = false;
+  activeCommunityId.value = communities.value[0]?.id || null;
+  selected.value = null;
+  if (activeCommunityId.value) await chooseGuild(communities.value[0]); else await openHome();
+}
+async function deleteActiveCommunity() {
+  const community = activeCommunity.value;
+  if (!community || isRemoteCommunity(community)) return;
+  if (!confirm(`Permanently delete ${community.name}? This cannot be undone.`)) return;
+  await api(`/api/v1/guilds/${encodeURIComponent(community.id)}`, { method: "DELETE" });
+  communities.value = (await api("/api/v1/guilds")).guilds || [];
+  guildSettingsDialog.value = false;
+  activeCommunityId.value = communities.value[0]?.id || null;
+  selected.value = null;
+  if (activeCommunityId.value) await chooseGuild(communities.value[0]); else await openHome();
 }
 function profileThemeStyle(profile) {
   const theme = publishedItem(
@@ -2519,11 +2601,50 @@ async function publishCreation() {
 function showChannelMenu(event, channel) {
   event.preventDefault();
   appMenu.value = null;
+  channelCreateMenu.value = null;
   channelMenu.value = {
     channel,
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - 480)),
   };
+}
+function showChannelCreateMenu(event) {
+  if (isRemoteCommunity()) return;
+  event.preventDefault();
+  appMenu.value = null;
+  channelMenu.value = null;
+  channelCreateMenu.value = {
+    x: Math.max(8, Math.min(event.clientX, window.innerWidth - 230)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - 190)),
+  };
+}
+async function createSidebarChannel(kind, categoryId = null) {
+  const rolePicker = kind === "role-picker";
+  const name = window.prompt(`New ${kind === "voice" ? "voice" : rolePicker ? "role picker" : "text"} channel name:`)?.trim();
+  if (!name) return;
+  try {
+    const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels`, {
+      method: "POST", body: JSON.stringify({ name, kind: rolePicker ? "text" : kind, rolePicker }),
+    });
+    // Add it before moving: the persisted ordering endpoint validates the
+    // complete local channel collection.
+    activeCommunity.value.channels.push(result.channel);
+    if (categoryId) await moveChannelToCategory(result.channel, categoryId);
+    emitCommunityChanged(activeCommunity.value?.id);
+  } catch (e) { error.value = e.message; }
+  finally { channelCreateMenu.value = null; }
+}
+async function createSidebarCategory() {
+  const name = window.prompt("New category name:")?.trim();
+  if (!name) return;
+  try {
+    const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/categories`, {
+      method: "POST", body: JSON.stringify({ name }),
+    });
+    guildCategories.value.push(result.category);
+    emitCommunityChanged(activeCommunity.value?.id);
+  } catch (e) { error.value = e.message; }
+  finally { channelCreateMenu.value = null; }
 }
 function showAppMenu(event) {
   event.preventDefault();
@@ -2615,6 +2736,7 @@ async function openChannelSettings(
     e2eeEnabled: Boolean(channel.e2ee_enabled),
     nsfw: Boolean(channel.nsfw),
   };
+  rolePickerEditor.value = rolePickerCategories(channel).map((category) => ({ ...category, role_ids: [...(category.role_ids || [])] }));
   channelSettingsTab.value = tab;
   channelSettingsOpen.value = true;
   channelMenu.value = null;
@@ -2809,6 +2931,7 @@ async function openGuildSettings(tab = "overview") {
     guildInvites.value = invites.invites;
     guildCategories.value = categories.categories;
     guildMembers.value = members.members;
+    guildBans.value = [];
     guildWebhooks.value = webhooks.webhooks;
     guildEmojis.value = emojis.guild_emojis;
   } catch (e) {
@@ -2982,9 +3105,10 @@ async function uploadCommunityMedia(kind, file) {
 }
 async function addChannel() {
   try {
+    const rolePicker = channelForm.value.kind === "role-picker";
     const result = await api(
       `/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/channels`,
-      { method: "POST", body: JSON.stringify(channelForm.value) },
+      { method: "POST", body: JSON.stringify({ ...channelForm.value, kind: rolePicker ? "text" : channelForm.value.kind, rolePicker }) },
     );
     activeCommunity.value.channels.push(result.channel);
     emitCommunityChanged(activeCommunity.value?.id);
@@ -2992,6 +3116,27 @@ async function addChannel() {
   } catch (e) {
     error.value = e.message;
   }
+}
+function addRolePickerCategory() {
+  rolePickerEditor.value.push({ id: crypto.randomUUID(), name: "New role group", role_ids: [] });
+}
+function removeRolePickerCategory(index) { rolePickerEditor.value.splice(index, 1); }
+function toggleRolePickerEditorRole(category, roleId) {
+  const roles = new Set((category.role_ids || []).map(String));
+  roles.has(String(roleId)) ? roles.delete(String(roleId)) : roles.add(String(roleId));
+  category.role_ids = [...roles];
+}
+async function saveRolePickerConfiguration() {
+  try {
+    const result = await api(`/api/v1/channels/${encodeURIComponent(channelSettingsForm.value.id)}/role-picker`, {
+      method: "PUT", body: JSON.stringify({ categories: rolePickerEditor.value }),
+    });
+    channelSettingsForm.value.role_picker = result.categories;
+    const channel = activeCommunity.value.channels.find((item) => item.id === channelSettingsForm.value.id);
+    if (channel) Object.assign(channel, result.channel);
+    saved.value = "Role picker saved";
+    emitCommunityChanged(activeCommunity.value?.id);
+  } catch (e) { error.value = e.message; }
 }
 async function addPeer() {
   error.value = "";
@@ -3872,15 +4017,19 @@ watch(
         </label>
       </header>
       <template v-if="page === 'chat'">
-        <div class="channel-list-scroll">
+        <div class="channel-list-scroll" @contextmenu="showChannelCreateMenu">
         <section v-for="group in sidebarChannelGroups" :key="group.id" class="channel-category-group">
-          <span class="label">{{ group.name }}</span>
+          <span
+            class="label channel-category-drop-target"
+            @dragover.prevent
+            @drop.stop="moveChannelToCategory(activeCommunity.channels.find((item) => item.id === draggedChannelId), group.id === 'uncategorized' ? null : group.id); draggedChannelId = null"
+          >{{ group.name }}</span>
           <template v-for="channel in group.channels" :key="channel.id">
           <button
             draggable="true"
             @dragstart="draggedChannelId = channel.id"
             @dragover.prevent
-            @drop="moveChannel(activeCommunity.channels.find((item) => item.id === draggedChannelId), channel); draggedChannelId = null"
+            @drop.stop="moveChannel(activeCommunity.channels.find((item) => item.id === draggedChannelId), channel); draggedChannelId = null"
             :class="{ selected: selected?.id === channel.id }"
             @click="selectChannel(channel)"
             @contextmenu.stop="showChannelMenu($event, channel)"
@@ -4003,7 +4152,21 @@ watch(
           <span v-else>{{ participant.identity?.[0]?.toUpperCase() || "?" }}</span>
         </button>
       </div>
-      <div v-if="selected?.kind === 'text'" ref="messageListElement" class="messages">
+      <section v-if="isRolePickerChannel()" class="role-picker-channel">
+        <span class="eyebrow">SELF-ASSIGN ROLES</span>
+        <h2>{{ selected.name }}</h2>
+        <p>{{ selected.topic || 'Choose the roles that describe you. You can change these whenever you like.' }}</p>
+        <article v-for="category in rolePickerCategories()" :key="category.id" class="role-picker-group">
+          <h3>{{ category.name }}</h3>
+          <div>
+            <button v-for="roleId in category.role_ids" :key="roleId" :class="{ selected: rolePickerAssignedRoles.map(String).includes(String(roleId)) }" @click="toggleRolePickerRole(guildRoles.find((role) => String(role.id) === String(roleId)))">
+              <i :style="{ background: guildRoles.find((role) => String(role.id) === String(roleId))?.color || '#99aab5' }"></i>{{ guildRoles.find((role) => String(role.id) === String(roleId))?.name || 'Role' }}
+            </button>
+          </div>
+        </article>
+        <p v-if="!rolePickerCategories().length" class="empty">An administrator has not configured any self-assignable roles yet.</p>
+      </section>
+      <div v-else-if="selected?.kind === 'text'" ref="messageListElement" class="messages">
         <section v-if="selected?.kind === 'text' && !displayedMessages.length" class="channel-empty-state">
           <span>#</span>
           <h2>Welcome to #{{ selected?.name }}</h2>
@@ -4339,7 +4502,7 @@ watch(
           </section>
         </div>
       </div>
-      <form v-if="selected?.kind === 'text'" class="message-composer" @submit.prevent="sendMessage">
+      <form v-if="selected?.kind === 'text' && !isRolePickerChannel()" class="message-composer" @submit.prevent="sendMessage">
         <button type="button" class="attachment-button" title="More message options" @click="composerMenuOpen = !composerMenuOpen">＋</button>
         <div v-if="pendingAttachments.length" class="attachment-previews"><span v-for="attachment in pendingAttachments" :key="attachment.id"><img :src="apiEndpoint(attachment.url)" :alt="attachment.name" /><button type="button" :class="{ active: contentWarning }" @click="contentWarning = contentWarning ? '' : 'Content warning'">{{ contentWarning ? 'Content warning' : 'Mark as content warning' }}</button></span></div>
         <input
@@ -4884,6 +5047,24 @@ watch(
       <button @click="copyChannelValue('id')">Copy Channel ID</button>
     </menu>
     <div
+      v-if="channelCreateMenu"
+      class="context-dismiss"
+      @click="channelCreateMenu = null"
+      @contextmenu.prevent="channelCreateMenu = null"
+    ></div>
+    <menu
+      v-if="channelCreateMenu"
+      class="context-menu channel-context-menu"
+      :style="{ left: `${channelCreateMenu.x}px`, top: `${channelCreateMenu.y}px` }"
+      @contextmenu.stop.prevent
+    >
+      <button @click="createSidebarChannel('text')">Create Text Channel</button>
+      <button @click="createSidebarChannel('voice')">Create Voice Channel</button>
+      <button @click="createSidebarChannel('role-picker')">Create Role Picker</button>
+      <div class="context-separator"></div>
+      <button @click="createSidebarCategory">Create Category</button>
+    </menu>
+    <div
       v-if="userMenu"
       class="context-dismiss"
       @pointerdown="userMenu = null"
@@ -5066,6 +5247,11 @@ watch(
           Permissions
         </button>
         <button
+          v-if="channelSettingsForm.role_picker_enabled"
+          :class="{ selected: channelSettingsTab === 'role-picker' }"
+          @click="channelSettingsTab = 'role-picker'"
+        >Role Picker</button>
+        <button
           :class="{ selected: channelSettingsTab === 'invites' }"
           @click="channelSettingsTab = 'invites'"
         >
@@ -5188,6 +5374,19 @@ watch(
             Save Changes
           </button>
         </template>
+        <template v-else-if="channelSettingsTab === 'role-picker'">
+          <h2>Role Picker</h2>
+          <p>Create groups, then choose which non-managed roles members can opt into.</p>
+          <article v-for="(category, index) in rolePickerEditor" :key="category.id" class="role-picker-editor-group">
+            <label>Group name<input v-model="category.name" maxlength="80" /></label>
+            <button class="danger-text" @click="removeRolePickerCategory(index)">Remove group</button>
+            <div class="role-picker-editor-roles">
+              <button v-for="role in guildRoles.filter((item) => !item.managed)" :key="role.id" :class="{ selected: category.role_ids?.map(String).includes(String(role.id)) }" @click="toggleRolePickerEditorRole(category, role.id)"><i :style="{ background: role.color }"></i>{{ role.name }}</button>
+            </div>
+          </article>
+          <button @click="addRolePickerCategory">Add role group</button>
+          <button class="primary" @click="saveRolePickerConfiguration">Save Role Picker</button>
+        </template>
         <template v-else-if="channelSettingsTab === 'permissions'">
           <h2>Channel Permissions</h2>
           <p class="channel-help">Use permissions to customise who can do what in this channel.</p>
@@ -5300,7 +5499,11 @@ watch(
           @click="guildSettingsTab = 'audit'"
         >
           Audit Log</button
-        ><button disabled title="Community ban management is not available yet">Bans</button><span class="settings-group">Community</span
+        ><button
+          v-if="!isRemoteCommunity()"
+          :class="{ selected: guildSettingsTab === 'bans' }"
+          @click="guildSettingsTab = 'bans'; loadGuildBans()"
+        >Bans</button><span class="settings-group">Community</span
         ><button @click="guildSettingsTab = 'overview'">
           Community Overview</button
         ><button
@@ -5309,7 +5512,7 @@ watch(
         >
           Onboarding</button
         ><button disabled title="Server insights are not available yet">Server Insights</button
-        ><button class="delete-server-nav" disabled title="Server deletion is not available yet">Delete Server</button>
+        ><button :class="{ selected: guildSettingsTab === 'danger' }" class="delete-server-nav" @click="guildSettingsTab = 'danger'">{{ !isRemoteCommunity() && (activeCommunity.owner_id === user.id || isAdmin) ? 'Delete Server' : 'Leave Server' }}</button>
         <button class="settings-back-link" @click="guildSettingsDialog = false">← Back to chat</button>
       </aside>
       <section class="settings-content community-content">
@@ -5496,6 +5699,7 @@ watch(
               placeholder="new-channel"
             /><select v-model="channelForm.kind">
               <option value="text">Text</option>
+              <option value="role-picker">Role picker</option>
               <option value="voice">Voice</option></select
             ><button class="primary" @click="addChannel">Create channel</button>
           </div>
@@ -5509,7 +5713,7 @@ watch(
               @drop="moveChannel(activeCommunity.channels.find((item) => item.id === draggedChannelId), channel); draggedChannelId = null"
             >
               <strong
-                >{{ channel.kind === "text" ? "#" : "Voice" }}
+                >{{ channel.role_picker_enabled ? "Roles" : (channel.kind === "text" ? "#" : "Voice") }}
                 {{ channel.name }}</strong
               ><button
                 @click="channelMenu = { channel, x: innerWidth / 2, y: 180 }"
@@ -5719,14 +5923,38 @@ watch(
             <article v-for="member in guildMembers" :key="member.id">
               <strong>{{ member.nickname || member.display_name }}</strong
               ><small>{{ member.username }}@{{ user.home_server }}</small
-              ><button
-                v-if="member.id !== activeCommunity.owner_id"
-                class="danger-text"
-                @click="removeCommunityMember(member)"
-              >Remove</button>
+              ><template v-if="!isRemoteCommunity() && member.id !== activeCommunity.owner_id">
+                <button class="danger-text" @click="removeCommunityMember(member)">Kick</button>
+                <button class="danger-text" @click="banCommunityMember(member)">Ban</button>
+              </template>
             </article>
           </div></template
         >
+        <template v-else-if="guildSettingsTab === 'bans'">
+          <h2>Bans</h2>
+          <p>Members on this list cannot rejoin this community until they are unbanned.</p>
+          <div class="resource-list">
+            <article v-for="ban in guildBans" :key="ban.actor">
+              <strong>{{ ban.actor }}</strong><small>{{ ban.reason || 'No reason provided' }}</small>
+              <button class="danger-text" @click="unbanCommunityMember(ban)">Unban</button>
+            </article>
+            <p v-if="!guildBans.length" class="empty">This community has no banned members.</p>
+          </div>
+        </template>
+        <template v-else-if="guildSettingsTab === 'danger'">
+          <h2>Danger Zone</h2>
+          <p>These actions affect your membership or the entire community.</p>
+          <div class="resource-list">
+            <article v-if="isRemoteCommunity() || activeCommunity.owner_id !== user.id">
+              <strong>Leave Server</strong><small>You will no longer have access to its channels.</small>
+              <button class="danger-text" @click="leaveActiveCommunity">Leave</button>
+            </article>
+            <article v-if="!isRemoteCommunity() && (activeCommunity.owner_id === user.id || isAdmin)">
+              <strong>Delete Server</strong><small>Permanently deletes the community, channels, and membership data.</small>
+              <button class="danger-text" @click="deleteActiveCommunity">Delete</button>
+            </article>
+          </div>
+        </template>
         <template v-else-if="guildSettingsTab === 'invites'"
           ><h2>Invites</h2>
           <div class="settings-create">

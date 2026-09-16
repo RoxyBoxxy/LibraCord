@@ -14,6 +14,7 @@ import "./members.css";
 import "./community-settings.css";
 import "./community-profile.css";
 import "./roles.css";
+import "./role-picker.css";
 import "./channel-settings.css";
 import "./social-profile.css";
 import "./self-profile.css";

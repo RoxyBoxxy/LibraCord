@@ -84,6 +84,7 @@ import {
   userCanSendToChannel,
   userCanConnectToChannel,
   removeGuildMember,
+  listChannelRolePicker, saveChannelRolePicker, toggleRolePickerRole,
   listBotApps, createBotApp, findBotApp, deleteBotApp, createBotToken, listBotTokens, revokeBotToken, findBotToken, touchBotToken, listBotCommands, upsertBotCommand, deleteBotCommand, listAllBotCommands, listGuildBotCommands, createBotInvite, findBotInvite, installBot, listBotInstalls,
   listDirectMessages,
   createDirectMessage,
@@ -105,7 +106,7 @@ import { aggregateFederatedHome, checkFederationPeer } from "./federated-home.js
 import { checkBrowserNavigation } from "./plugins/browser-policy.js";
 import { moderationEvents } from "./moderation-events.js";
 import {
-  canonicalJson, createMigrationBundle, createRemoteJoin, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope, signEnvelope,
+  canonicalJson, createMigrationBundle, createRemoteJoin, createRemoteLeave, discoverFederationPeer, federationDomain, federationFetch, processIncomingEnvelope, signEnvelope,
   federationEvents, publicFederationIdentity, publishCommunityDeleted, publishCommunitySnapshot, queueFederationEvent,
   syncEvents, verifyDmKey, verifyEnvelope, claimLocalMigration,
 } from "./federation.js";
@@ -888,6 +889,14 @@ export function createApp() {
         for (const destination of destinations) if (destination)
           void queueFederationEvent({ destination, type, entityId, payload: eventPayload }).catch(() => {});
       };
+      if (payload.action === "role-picker.toggle") {
+        if (!channel.role_picker_enabled) return res.status(404).json({ error: "Role picker not found" });
+        const roleIds = toggleRolePickerRole(communityId, channelId, userGlobalId, String(payload.role_id || ""));
+        // Membership-role data is part of the community snapshot, so publish
+        // it after an opt-in role changes on the home instance.
+        void publishCommunitySnapshot(communityId).catch(() => {});
+        return res.json({ role_ids: roleIds });
+      }
       if (payload.action === "list") return res.json({ messages: listMessages(channelId).map(federatedMessage) });
       if (payload.action === "delete") {
         const messageId = Number(payload.message_id);
@@ -1630,7 +1639,8 @@ export function createApp() {
         .toLowerCase()
         .replace(/\s+/g, "-")
         .slice(0, 80),
-      kind = ["text", "voice"].includes(req.body?.kind) ? req.body.kind : null;
+      kind = ["text", "voice"].includes(req.body?.kind) ? req.body.kind : null,
+      rolePicker = Boolean(req.body?.rolePicker) && req.body?.kind === "text";
     if (!name || !kind)
       return res
         .status(400)
@@ -1642,6 +1652,7 @@ export function createApp() {
           communityId: req.params.id,
           name,
           kind,
+          rolePickerEnabled: rolePicker,
         }),
       });
     } catch {
@@ -1713,6 +1724,32 @@ export function createApp() {
         ? res.status(204).end()
         : res.status(404).json({ error: "Channel not found" }),
   );
+  app.get("/api/v1/channels/:id/role-picker", requireUser, async (req, res) => {
+    const remote = remoteChannelFor(req.user.id, req.params.id);
+    if (remote) return res.json({ categories: typeof remote.channel.role_picker === "string" ? JSON.parse(remote.channel.role_picker || "[]") : (remote.channel.role_picker || []), role_ids: remote.remote.roles || [] });
+    const channel = findChannel(req.params.id);
+    if (!channel || !channel.role_picker_enabled || !isGuildMember(channel.community_id, req.user.id)) return res.status(404).json({ error: "Role picker not found" });
+    return res.json({ categories: listChannelRolePicker(channel.id), role_ids: listUserGuildRoles(channel.community_id, req.user.id).map((role) => role.id) });
+  });
+  app.put("/api/v1/channels/:id/role-picker", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES, (req) => findChannel(req.params.id)?.community_id), (req, res) => {
+    const channel = findChannel(req.params.id);
+    if (!channel || channel.kind !== "text" || !channel.role_picker_enabled) return res.status(404).json({ error: "Role picker not found" });
+    const source = Array.isArray(req.body?.categories) ? req.body.categories.slice(0, 20) : [];
+    const roles = new Set(listGuildRoles(channel.community_id).filter((role) => !role.managed).map((role) => String(role.id)));
+    const categories = source.map((category) => ({ id: String(category.id || randomUUID()), name: String(category.name || "Roles").trim().slice(0, 80), role_ids: [...new Set((Array.isArray(category.role_ids) ? category.role_ids : []).map(String))].filter((id) => roles.has(id)).slice(0, 100) })).filter((category) => category.name);
+    return res.json({ channel: saveChannelRolePicker(channel.id, categories), categories });
+  });
+  app.post("/api/v1/channels/:id/role-picker/roles/:roleId", requireUser, async (req, res) => {
+    const remote = remoteChannelFor(req.user.id, req.params.id);
+    if (remote) {
+      try { return res.json(await requestRemoteChannel(req, req.params.id, "role-picker.toggle", { role_id: req.params.roleId })); }
+      catch (error) { return res.status(400).json({ error: error.message }); }
+    }
+    const channel = findChannel(req.params.id);
+    if (!channel || !channel.role_picker_enabled || !isGuildMember(channel.community_id, req.user.id)) return res.status(404).json({ error: "Role picker not found" });
+    try { return res.json({ role_ids: toggleRolePickerRole(channel.community_id, channel.id, req.user.id, req.params.roleId) }); }
+    catch (error) { return res.status(400).json({ error: error.message }); }
+  });
   app.get("/api/v1/guilds/:id/members", requireUser, async (req, res) => {
     const remote = remoteCommunityFor(req.user.id, req.params.id);
     if (remote) {
@@ -1767,7 +1804,18 @@ export function createApp() {
       ? res.json({ members: listGuildMembers(req.params.id).map((member) => ({ ...member, roles: member.remote ? member.roles : listUserGuildRoles(req.params.id, member.id) })) })
       : res.status(403).json({ error: "Join this community first" });
   });
-  app.delete("/api/v1/guilds/:id/members/@me", requireUser, (req, res) => removeGuildMember(req.params.id, req.user.id) ? res.status(204).end() : res.status(404).json({ error: "Membership not found" }));
+  app.delete("/api/v1/guilds/:id/members/@me", requireUser, async (req, res) => {
+    const remote = remoteCommunityFor(req.user.id, req.params.id);
+    if (remote) {
+      try {
+        const event = await createRemoteLeave(req.user, remote);
+        return res.status(202).json({ status: "leaving", event_id: event.event_id });
+      } catch (error) { return res.status(400).json({ error: error.message }); }
+    }
+    return removeGuildMember(req.params.id, req.user.id)
+      ? res.status(204).end()
+      : res.status(404).json({ error: "Membership not found" });
+  });
   app.get("/api/v1/guilds/:id/roles", requireUser, (req, res) => {
     const remote = remoteCommunityFor(req.user.id, req.params.id);
     if (remote) return res.json({ roles: remote.state?.roles || [] });
@@ -1864,7 +1912,9 @@ export function createApp() {
     const actor = String(req.body?.actor || "").trim().slice(0, 300);
     if (!actor || !actor.includes("#")) return res.status(400).json({ error: "Use a portable actor ID such as user-id#instance.example" });
     const localSuffix = `#${federationDomain()}`;
-    if (actor.endsWith(localSuffix)) removeGuildMember(req.params.id, actor.slice(0, -localSuffix.length));
+    // A ban always removes an existing membership, whether the target is a
+    // local user or a portable user from a federated instance.
+    removeGuildMember(req.params.id, actor.endsWith(localSuffix) ? actor.slice(0, -localSuffix.length) : actor);
     return res.status(201).json({ ban: banGuildActor(req.params.id, actor, String(req.body?.reason || "").slice(0, 500), req.user.id) });
   });
   app.delete("/api/v1/guilds/:id/bans/:actor", requireUser, requireGuildPermission(Permissions.MANAGE_ROLES), (req, res) =>

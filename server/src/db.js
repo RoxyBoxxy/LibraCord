@@ -174,6 +174,8 @@ for (const [name, definition] of [
   ["voice_sample_rate", "INTEGER NOT NULL DEFAULT 48000"],
   ["position", "INTEGER NOT NULL DEFAULT 0"],
   ["source_type", "INTEGER NOT NULL DEFAULT 0"],
+  ["role_picker", "TEXT NOT NULL DEFAULT '[]'"],
+  ["role_picker_enabled", "INTEGER NOT NULL DEFAULT 0"],
 ])
   if (
     !db
@@ -609,10 +611,10 @@ export function removeCommunity(id) {
     throw error;
   }
 }
-export function createChannel({ id, communityId, name, kind, position = 0, sourceType = kind === "voice" ? 2 : 0 }) {
+export function createChannel({ id, communityId, name, kind, position = 0, sourceType = kind === "voice" ? 2 : 0, rolePickerEnabled = false, rolePicker = [] }) {
   db.prepare(
-    "INSERT INTO channels(id,community_id,name,kind,position,source_type) VALUES(?,?,?,?,?,?)",
-  ).run(id, communityId, name, kind, position, Number(sourceType) || 0);
+    "INSERT INTO channels(id,community_id,name,kind,position,source_type,role_picker_enabled,role_picker) VALUES(?,?,?,?,?,?,?,?)",
+  ).run(id, communityId, name, kind, position, Number(sourceType) || 0, rolePickerEnabled ? 1 : 0, JSON.stringify(rolePicker));
   return db.prepare("SELECT * FROM channels WHERE id=?").get(id);
 }
 export function listUsers() {
@@ -1066,6 +1068,38 @@ export function setMemberRoles(guildId, userId, roleIds) {
   const insert = db.prepare("INSERT INTO member_roles VALUES(?,?,?)");
   for (const roleId of roleIds) insert.run(guildId, userId, roleId);
   return roleIds;
+}
+function parseRolePicker(channel) {
+  try {
+    const value = JSON.parse(channel?.role_picker || "[]");
+    return Array.isArray(value) ? value : [];
+  } catch { return []; }
+}
+export function listChannelRolePicker(channelId) {
+  return parseRolePicker(findChannel(channelId));
+}
+export function saveChannelRolePicker(channelId, categories) {
+  db.prepare("UPDATE channels SET role_picker=? WHERE id=?").run(JSON.stringify(categories), channelId);
+  return db.prepare("SELECT * FROM channels WHERE id=?").get(channelId);
+}
+export function toggleRolePickerRole(guildId, channelId, userId, roleId) {
+  const available = new Set(parseRolePicker(findChannel(channelId)).flatMap((category) => category.role_ids || []).map(String));
+  if (!available.has(String(roleId))) throw new Error("That role is not available in this role picker");
+  const role = db.prepare("SELECT id,managed FROM guild_roles WHERE id=? AND guild_id=?").get(roleId, guildId);
+  if (!role || role.managed) throw new Error("That role cannot be self-assigned");
+  if (String(userId).includes("#")) {
+    const communityGlobalId = `${guildId}#${federationDomainForDb()}`;
+    const member = db.prepare("SELECT status,roles FROM remote_memberships WHERE community_global_id=? AND user_global_id=?").get(communityGlobalId, userId);
+    if (!member || member.status !== "joined") throw new Error("Remote member not found");
+    const roles = new Set(JSON.parse(member.roles || "[]").map(String));
+    roles.has(String(roleId)) ? roles.delete(String(roleId)) : roles.add(String(roleId));
+    saveRemoteMembership(communityGlobalId, userId, member.status, [...roles]);
+    return [...roles];
+  }
+  const assigned = new Set(db.prepare("SELECT role_id FROM member_roles WHERE guild_id=? AND user_id=?").all(guildId, userId).map((row) => String(row.role_id)));
+  assigned.has(String(roleId)) ? assigned.delete(String(roleId)) : assigned.add(String(roleId));
+  setMemberRoles(guildId, userId, [...assigned]);
+  return [...assigned];
 }
 export function listInstanceEmojis() {
   return db
