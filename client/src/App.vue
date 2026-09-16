@@ -5981,7 +5981,7 @@ watch(
               <span>▣ Copy User ID</span>
             </button>
           </div>
-          <div v-if="activeProfileMode !== 'self'" class="profile-section">
+          <div v-if="activeProfileMode !== 'self' && activeProfile.created_at" class="profile-section">
             <strong>Member since</strong>
             <p>
               {{
@@ -5992,7 +5992,7 @@ watch(
               }}
             </p>
           </div>
-          <div v-if="activeProfileMode !== 'self'" class="profile-section">
+          <div v-if="activeProfileMode !== 'self' && (activeProfile.roles?.length || activeProfile.role)" class="profile-section">
             <strong>Roles</strong>
             <div class="profile-roles">
               <span

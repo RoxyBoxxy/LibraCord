@@ -561,7 +561,11 @@ export function createApp() {
       }
     }
     if (!identity) return res.status(404).json({ error: "User not found" });
-    const profileSource = identity.profile && typeof identity.profile === "object" ? identity.profile : identity;
+    const memberIdentity = (remoteCommunity?.state?.member_identities || []).find((member) =>
+      String(member.global_id || `${member.id}#${member.origin || remoteOrigin}`) === `${remoteUserId}#${remoteOrigin}`) || null;
+    // The current community snapshot is authoritative for a member's
+    // per-community identity and join date. Prefer it over a cached identity.
+    const profileSource = memberIdentity?.profile || (identity.profile && typeof identity.profile === "object" ? identity.profile : identity);
     const remoteBase = findPeerByDomain(remoteOrigin)?.base_url || `https://${remoteOrigin}`;
     const remoteAsset = (value) => {
       if (!value) return "";
@@ -569,18 +573,18 @@ export function createApp() {
     };
     const profile = {
       id: `${remoteUserId}#${remoteOrigin}`,
-      username: identity.username || remoteUserId,
-      handle: `${identity.username || remoteUserId}@${remoteOrigin}`,
+      username: memberIdentity?.username || identity.username || remoteUserId,
+      handle: `${memberIdentity?.username || identity.username || remoteUserId}@${remoteOrigin}`,
       home_server: remoteOrigin,
-      display_name: identity.display_name || identity.username || remoteUserId,
-      avatar_url: remoteAsset(identity.avatar_url),
-      banner_url: remoteAsset(identity.banner_url),
+      display_name: memberIdentity?.display_name || identity.display_name || identity.username || remoteUserId,
+      avatar_url: remoteAsset(memberIdentity?.avatar_url || identity.avatar_url),
+      banner_url: remoteAsset(memberIdentity?.banner_url || identity.banner_url),
       bio: profileSource.bio || "",
       accent_color: profileSource.accent_color || "#7857ff",
       server_tag: profileSource.server_tag || "",
       server_tag_emoji: profileSource.server_tag_emoji || "",
       profile_css: profileSource.profile_css || "",
-      role: "remote",
+      role: "",
       status: profileSource.status || "online",
       status_text: profileSource.status_text || profileSource.statusText || "",
       decoration_id: profileSource.decoration_id || profileSource.selectedDecorationId || "",
@@ -589,11 +593,12 @@ export function createApp() {
       server_tag_selection: profileSource.server_tag_selection || profileSource.serverTag || null,
       profile_background: profileSource.profile_background || profileSource.profileBackground || "#21152c",
       profile_background_image: profileSource.profile_background_image || profileSource.profileBackgroundImage || "",
-      created_at: identity.created_at || null,
+      created_at: memberIdentity?.joined_at || identity.created_at || null,
     };
-    if (remoteCommunity && Array.isArray(remoteCommunity.state?.remote_members)) {
-      const member = remoteCommunity.state.remote_members.find((item) => String(item.global_id) === profile.id);
-      profile.roles = (member?.roles || []).map((roleId) => (remoteCommunity.state.roles || []).find((role) => String(role.id) === String(roleId))).filter(Boolean);
+    if (remoteCommunity) {
+      const storedMember = remoteCommunity.state?.remote_members?.find((item) => String(item.global_id) === profile.id);
+      const roleIds = memberIdentity?.roles || storedMember?.roles || [];
+      profile.roles = roleIds.map((roleId) => (remoteCommunity.state.roles || []).find((role) => String(role.id) === String(roleId))).filter(Boolean);
     }
     return res.json({ profile });
   });
@@ -1730,7 +1735,7 @@ export function createApp() {
           username_style_ids: profile.username_style_ids || profile.selectedUsernameStyleIds || [],
           joined_at: member.joined_at || null,
           remote: true,
-          roles: member.roles || [],
+          roles: (member.roles || []).map((roleId) => (remoteState.roles || []).find((role) => String(role.id) === String(roleId))).filter(Boolean),
         };
       });
       return res.json({ members });

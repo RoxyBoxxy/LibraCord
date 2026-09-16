@@ -1688,19 +1688,25 @@ export function communityFederationSnapshot(guildId, domain) {
     if (!value) return "";
     try { return new URL(value, `${origin}/`).href; } catch { return value; }
   };
+  const roleIdsByMember = new Map();
+  for (const membership of db.prepare("SELECT user_id,role_id FROM member_roles WHERE guild_id=?").all(guildId)) {
+    const roles = roleIdsByMember.get(membership.user_id) || [];
+    roles.push(membership.role_id); roleIdsByMember.set(membership.user_id, roles);
+  }
   const localIdentities = db.prepare(`SELECT u.id,u.username,u.display_name,u.avatar_url,u.banner_url,u.bio,u.accent_color,u.server_tag,u.server_tag_emoji,u.profile_css,u.settings,m.joined_at
     FROM guild_members m JOIN users u ON u.id=m.user_id WHERE m.guild_id=?`).all(guildId).map((member) => {
     let settings = {}; try { settings = JSON.parse(member.settings || "{}"); } catch {}
-    return { id: member.id, origin: domain, username: member.username, display_name: member.display_name,
+    return { id: member.id, global_id: `${member.id}#${domain}`, origin: domain, username: member.username, display_name: member.display_name,
       avatar_url: absoluteUrl(member.avatar_url), banner_url: absoluteUrl(member.banner_url), joined_at: member.joined_at,
+      roles: roleIdsByMember.get(member.id) || [],
       profile: { bio: member.bio || "", accent_color: member.accent_color || "#7857ff", server_tag: member.server_tag || "", server_tag_emoji: member.server_tag_emoji || "", profile_css: member.profile_css || "",
         status: settings.status || "online", status_text: settings.statusText || "", decoration_id: settings.selectedDecorationId || "", profile_theme_id: settings.selectedProfileThemeId || "",
         username_style_ids: Array.isArray(settings.selectedUsernameStyleIds) ? settings.selectedUsernameStyleIds : [], server_tag_selection: settings.serverTag || null,
         profile_background: settings.profileBackground || "#21152c", profile_background_image: settings.profileBackgroundImage || "" } };
   });
-  const remoteIdentities = db.prepare(`SELECT i.global_id,i.origin,i.remote_user_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,i.profile,m.joined_at
+  const remoteIdentities = db.prepare(`SELECT i.global_id,i.origin,i.remote_user_id AS id,i.username,i.display_name,i.avatar_url,i.banner_url,i.profile,m.joined_at,m.roles
     FROM remote_memberships m JOIN remote_identities i ON i.global_id=m.user_global_id WHERE m.community_global_id=? AND m.status='joined'`).all(`${guildId}#${domain}`).map((member) => ({
-    id: member.id, origin: member.origin, username: member.username, display_name: member.display_name, avatar_url: member.avatar_url || "", banner_url: member.banner_url || "", joined_at: member.joined_at,
+    id: member.id, global_id: member.global_id, origin: member.origin, username: member.username, display_name: member.display_name, avatar_url: member.avatar_url || "", banner_url: member.banner_url || "", joined_at: member.joined_at, roles: JSON.parse(member.roles || "[]"),
     profile: JSON.parse(member.profile || "{}"),
   }));
   return {
