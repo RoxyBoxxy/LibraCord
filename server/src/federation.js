@@ -208,6 +208,25 @@ export async function publishCommunitySnapshot(guildId) {
     queueFederationEvent({ peer, type: "community.snapshot", entityId: snapshot.global_id, payload: snapshot })));
 }
 
+// Channel activity is sent only to instances with members in the community.
+// Delivery still uses the durable signed outbox; connected browser clients on
+// the receiving instance get the event immediately over Socket.IO.
+export async function publishFederatedChannelEvent(guildId, type, entityId, payload) {
+  const relevantDomains = new Set(listPeerDomainsForCommunity(guildId, federationDomain()));
+  return Promise.allSettled(listPeers().filter((peer) => peer.status === "allowed" && relevantDomains.has(
+    (peer.federation_domain || new URL(peer.base_url).host).toLowerCase())).map((peer) =>
+    queueFederationEvent({ peer, type, entityId, payload })));
+}
+
+export function federatedChannelMessage(message) {
+  const origin = String(process.env.PUBLIC_URL || `http://${federationDomain()}`).replace(/\/$/, "");
+  const assetUrl = (value) => value ? new URL(value, `${origin}/`).href : "";
+  return { ...message,
+    author_id: String(message.author_id || "").includes("#") ? message.author_id : `${message.author_id}#${federationDomain()}`,
+    attachments: (message.attachments || []).map((attachment) => ({ ...attachment, url: assetUrl(attachment.url) })),
+  };
+}
+
 export async function publishCommunityDeleted(guildId, peers) {
   const globalId = `${guildId}#${federationDomain()}`;
   return Promise.all(peers.map((peer) => queueFederationEvent({ peer, type: "community.delete", entityId: globalId,
@@ -319,6 +338,10 @@ export async function processIncomingEnvelope(envelope) {
       const p = envelope.payload || {};
       if (!p.channel_id || !p.message_id || !Array.isArray(p.reactions)) throw new Error("Invalid channel reaction event");
       federationEvents.emit("remote-channel:reactions", p);
+    } else if (envelope.type === "channel.typing") {
+      const p = envelope.payload || {};
+      if (!p.channel_id || !p.user_id || typeof p.typing !== "boolean") throw new Error("Invalid channel typing event");
+      federationEvents.emit("remote-channel:typing", p);
     } else if (envelope.type === "dm.encrypted") {
       const message = envelope.payload;
       if (!message?.ciphertext || String(message.ciphertext).length > 256_000) throw new Error("Invalid encrypted message");

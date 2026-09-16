@@ -11,7 +11,7 @@ import {
   getSystemUser, getInstanceSettings, listCommunities, listRemoteCommunitiesForUser, userCanAccessChannel, userCanConnectToChannel, userCanSendToChannel,
 } from "./db.js";
 import { getUser } from "./auth.js";
-import { deliverFederationOutbox, federationDomain, federationEvents, publishCommunitySnapshot } from "./federation.js";
+import { deliverFederationOutbox, federationDomain, federationEvents, federatedChannelMessage, publishCommunitySnapshot, publishFederatedChannelEvent } from "./federation.js";
 import { moderationEvents } from "./moderation-events.js";
 import { toggleMessageReaction } from "./reactions.js";
 
@@ -84,19 +84,27 @@ io.on("connection", (socket) => {
   });
   socket.on("remote-channel:leave", (id) => socket.leave(`remote-channel:${String(id || "")}`));
   socket.on("typing:start", (id) => {
-    if (channelExists(id, "text") && userCanSendToChannel(id, socket.user.id))
+    if (channelExists(id, "text") && userCanSendToChannel(id, socket.user.id)) {
       socket.to(`channel:${id}`).emit("typing:update", {
         channelId: id, userId: socket.user.id, name: socket.user.display_name, typing: true,
       });
+      const channel = findChannel(id);
+      if (channel) void publishFederatedChannelEvent(channel.community_id, "channel.typing", `${id}:typing:${socket.user.id}`, { channel_id: id, user_id: `${socket.user.id}#${federationDomain()}`, name: socket.user.display_name, typing: true });
+    }
   });
-  socket.on("typing:stop", (id) => socket.to(`channel:${id}`).emit("typing:update", {
-    channelId: id, userId: socket.user.id, typing: false,
-  }));
+  socket.on("typing:stop", (id) => {
+    if (!channelExists(id, "text") || !userCanSendToChannel(id, socket.user.id)) return;
+    socket.to(`channel:${id}`).emit("typing:update", { channelId: id, userId: socket.user.id, typing: false });
+    const channel = findChannel(id);
+    if (channel) void publishFederatedChannelEvent(channel.community_id, "channel.typing", `${id}:typing:${socket.user.id}`, { channel_id: id, user_id: `${socket.user.id}#${federationDomain()}`, name: socket.user.display_name, typing: false });
+  });
   socket.on("message:reaction", (input, ack = () => {}) => {
     const channelId = String(input?.channelId || ""), messageId = String(input?.messageId || ""), emoji = String(input?.emoji || "").slice(0, 64);
     if (!channelExists(channelId, "text") || !userCanAccessChannel(channelId, socket.user.id) || !messageId || !emoji) return ack({ ok: false, error: "Invalid reaction" });
     const next = toggleMessageReaction(channelId, messageId, emoji);
     io.to(`channel:${channelId}`).emit("message:reactions", { channelId, messageId, reactions: next });
+    const channel = findChannel(channelId);
+    if (channel) void publishFederatedChannelEvent(channel.community_id, "channel.message.reactions", `${channelId}:${messageId}:reactions`, { channel_id: channelId, message_id: messageId, reactions: next });
     ack({ ok: true, reactions: next });
   });
   socket.on("emoji:changed", ({ communityId } = {}) => io.emit("emoji:changed", { communityId: String(communityId || "") }));
@@ -166,6 +174,8 @@ io.on("connection", (socket) => {
       return ack({ ok: false, error: "Invalid message" });
     const message = createMessage({ channelId, authorId: socket.user.id, authorName: socket.user.display_name, body, attachments, contentWarning, replyTo });
     io.to(`channel-notify:${channelId}`).emit("message:created", message);
+    const channel = findChannel(channelId);
+    if (channel) void publishFederatedChannelEvent(channel.community_id, "channel.message.create", `${channelId}:${message.id}`, { channel_id: channelId, message: federatedChannelMessage(message) });
     ack({ ok: true });
   });
   socket.on("message:edit", (input, ack = () => {}) => {
@@ -255,6 +265,7 @@ federationEvents.on("remote-community:changed", ({ communityGlobalId }) =>
 federationEvents.on("remote-channel:message", ({ channel_id, message }) => io.to(`remote-channel:${channel_id}`).emit("message:created", message));
 federationEvents.on("remote-channel:deleted", ({ channel_id, message_id }) => io.to(`remote-channel:${channel_id}`).emit("message:deleted", { channelId: channel_id, messageId: message_id }));
 federationEvents.on("remote-channel:reactions", ({ channel_id, message_id, reactions }) => io.to(`remote-channel:${channel_id}`).emit("message:reactions", { channelId: channel_id, messageId: message_id, reactions }));
+federationEvents.on("remote-channel:typing", ({ channel_id, user_id, name, typing }) => io.to(`remote-channel:${channel_id}`).emit("typing:update", { channelId: channel_id, userId: user_id, name, typing }));
 moderationEvents.on("system-message", ({ recipientId, message }) => {
   io.to(`user:${recipientId}`).emit("dm:created", message);
 });
