@@ -588,7 +588,9 @@ export function findCommunityByReference(reference) {
   return db.prepare("SELECT * FROM communities").all().find((community) => slug(community.name) === slug(wanted));
 }
 export function listCommunityChannels(communityId) {
-  return db.prepare("SELECT * FROM channels WHERE community_id=? ORDER BY name").all(communityId);
+  // This ordering is serialized into federation snapshots, so it must match
+  // the local navigation hierarchy rather than alphabetizing remote clients.
+  return db.prepare("SELECT * FROM channels WHERE community_id=? ORDER BY position, kind, name").all(communityId);
 }
 export function removeCommunity(id) {
   db.exec("BEGIN");
