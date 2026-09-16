@@ -234,6 +234,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   webhookForm = ref({ name: "", channelId: "" }),
   categoryName = ref(""),
   draggedChannelId = ref(null),
+  draggedRoleId = ref(null),
   guildMembers = ref([]),
   channelMenu = ref(null),
   channelSettingsOpen = ref(false),
@@ -387,9 +388,13 @@ const displayedMessages = computed(() => {
 });
 const displayedGuildMembers = computed(() => {
   const query = memberSearch.value.trim().toLowerCase();
-  return query
+  const members = query
     ? guildMembers.value.filter((member) => `${member.nickname || ""} ${member.display_name} ${member.username}`.toLowerCase().includes(query))
     : guildMembers.value;
+  return [...members].sort((a, b) => {
+    const hierarchy = Number(primaryMemberRole(b)?.position || -1) - Number(primaryMemberRole(a)?.position || -1);
+    return hierarchy || String(a.nickname || a.display_name).localeCompare(String(b.nickname || b.display_name));
+  });
 });
 const rolesByHierarchy = computed(() => [...guildRoles.value]
   .filter((role) => !role.managed)
@@ -1640,6 +1645,25 @@ async function toggleMemberRole(role) {
   try {
     const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/members/${encodeURIComponent(targetId)}/roles`, { method: "PUT", body: JSON.stringify({ roleIds: [...ids] }) });
     if (member) member.roles = (guildRoles.value || []).filter((item) => result.role_ids.includes(item.id)).sort((a, b) => Number(b.position || 0) - Number(a.position || 0));
+    emitCommunityChanged(activeCommunity.value.id);
+  } catch (e) { error.value = e.message; }
+}
+function startRoleDrag(event, role) {
+  if (role.managed) return;
+  draggedRoleId.value = role.id;
+  event.dataTransfer.effectAllowed = "move";
+}
+async function dropRoleBefore(target) {
+  const sourceId = draggedRoleId.value;
+  draggedRoleId.value = null;
+  if (!sourceId || sourceId === target.id || target.managed || !activeCommunity.value) return;
+  const ordered = rolesByHierarchy.value.map((role) => role.id);
+  const from = ordered.indexOf(sourceId), to = ordered.indexOf(target.id);
+  if (from < 0 || to < 0) return;
+  ordered.splice(from, 1); ordered.splice(to, 0, sourceId);
+  try {
+    guildRoles.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/roles/order`, { method: "PUT", body: JSON.stringify({ roleIds: ordered }) })).roles;
+    if (selectedRole.value) selectedRole.value = guildRoles.value.find((role) => role.id === selectedRole.value.id) || null;
     emitCommunityChanged(activeCommunity.value.id);
   } catch (e) { error.value = e.message; }
 }
@@ -3414,8 +3438,9 @@ socket.on("federation:membership", async () => {
 socket.on("federation:community-deleted", async () => {
   communities.value = (await api("/api/v1/guilds")).guilds || [];
 });
-socket.on("federation:community-changed", async () => {
+socket.on("federation:community-changed", async ({ communityGlobalId } = {}) => {
   communities.value = (await api("/api/v1/guilds")).guilds || [];
+  if (communityGlobalId && String(activeCommunityId.value) === String(communityGlobalId)) void refreshCommunityFromServer(communityGlobalId);
 });
 socket.on("dm:created", async (message) => {
   const otherId = message.sender_id === user.value.id ? message.recipient_id : message.sender_id;
@@ -5518,9 +5543,13 @@ watch(
                 <strong>BACK</strong><button @click="addRole">+</button>
               </header>
               <button
-                v-for="role in guildRoles"
+                v-for="role in [...rolesByHierarchy, ...guildRoles.filter((role) => role.managed)]"
                 :key="role.id"
                 :class="{ selected: selectedRole?.id === role.id }"
+                :draggable="!role.managed"
+                @dragstart="startRoleDrag($event, role)"
+                @dragover.prevent
+                @drop="dropRoleBefore(role)"
                 @click="editRole(role)"
               >
                 <i :style="{ background: role.color }"></i>{{ role.name }}

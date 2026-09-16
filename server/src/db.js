@@ -719,6 +719,20 @@ export function listGuildRoles(guildId) {
     )
     .all(guildId);
 }
+export function reorderGuildRoles(guildId, roleIds) {
+  const roles = listGuildRoles(guildId);
+  const movable = roles.filter((role) => !role.managed);
+  const requested = Array.isArray(roleIds) ? roleIds.map(String) : [];
+  if (requested.length !== movable.length || new Set(requested).size !== requested.length || requested.some((id) => !movable.some((role) => String(role.id) === id)))
+    throw new Error("Role order must include every non-default role exactly once");
+  const update = db.prepare("UPDATE guild_roles SET position=? WHERE id=? AND guild_id=?");
+  db.exec("BEGIN");
+  try {
+    requested.forEach((id, index) => update.run(requested.length - index, id, guildId));
+    db.exec("COMMIT");
+  } catch (error) { db.exec("ROLLBACK"); throw error; }
+  return listGuildRoles(guildId);
+}
 export function listUserGuildRoles(guildId, userId) {
   return db
     .prepare(

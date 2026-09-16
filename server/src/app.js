@@ -56,6 +56,7 @@ import {
   listWebhooks,
   updateChannel,
   reorderChannels,
+  reorderGuildRoles,
   deleteChannel,
   findChannel,
   listPermissionOverrides,
@@ -1826,6 +1827,15 @@ export function createApp() {
       return role
         ? res.json({ role })
         : res.status(404).json({ error: "Role not found or managed role" });
+    },
+  );
+  app.put(
+    "/api/v1/guilds/:id/roles/order",
+    requireUser,
+    requireGuildPermission(Permissions.MANAGE_ROLES),
+    (req, res) => {
+      try { return res.json({ roles: reorderGuildRoles(req.params.id, req.body?.roleIds) }); }
+      catch (error) { return res.status(400).json({ error: error.message }); }
     },
   );
   app.put(
