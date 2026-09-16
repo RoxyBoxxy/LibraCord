@@ -67,9 +67,16 @@ export function federationDomain() {
 }
 
 export function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  // Envelopes are transmitted with JSON.stringify(). Match its treatment of
+  // undefined values exactly: omit object fields and encode array entries as
+  // null. Otherwise the bytes signed locally differ from the parsed payload
+  // received by a federation peer.
+  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item) ?? "null").join(",")}]`;
   if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value).sort().flatMap((key) => {
+      const serialized = canonicalJson(value[key]);
+      return serialized === undefined ? [] : [`${JSON.stringify(key)}:${serialized}`];
+    }).join(",")}}`;
   }
   return JSON.stringify(value);
 }

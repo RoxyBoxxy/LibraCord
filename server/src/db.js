@@ -47,6 +47,7 @@ db.exec(`
  CREATE TABLE IF NOT EXISTS guild_invites(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,code TEXT NOT NULL UNIQUE,creator_id TEXT NOT NULL,max_uses INTEGER NOT NULL DEFAULT 0,uses INTEGER NOT NULL DEFAULT 0,expires_at TEXT,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS guild_webhooks(id TEXT PRIMARY KEY,guild_id TEXT NOT NULL,channel_id TEXT NOT NULL,name TEXT NOT NULL,token_hash TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS instance_emojis(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE COLLATE NOCASE,asset_id TEXT NOT NULL,creator_id TEXT NOT NULL,guild_id TEXT,created_at TEXT NOT NULL,FOREIGN KEY(asset_id) REFERENCES assets(id),FOREIGN KEY(creator_id) REFERENCES users(id));
+ CREATE TABLE IF NOT EXISTS instance_stickers(id TEXT PRIMARY KEY,name TEXT NOT NULL,asset_id TEXT NOT NULL,creator_id TEXT NOT NULL,guild_id TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(guild_id,name),FOREIGN KEY(asset_id) REFERENCES assets(id),FOREIGN KEY(creator_id) REFERENCES users(id),FOREIGN KEY(guild_id) REFERENCES communities(id));
  CREATE TABLE IF NOT EXISTS social_posts(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,body TEXT NOT NULL,created_at TEXT NOT NULL,attachments TEXT NOT NULL DEFAULT '[]',reply_to TEXT,boost_count INTEGER NOT NULL DEFAULT 0,FOREIGN KEY(user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS published_items(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('theme','decoration','profile-theme')),name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',payload TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL,FOREIGN KEY(user_id) REFERENCES users(id));
  CREATE TABLE IF NOT EXISTS user_collections(user_id TEXT NOT NULL,item_id TEXT NOT NULL,added_at TEXT NOT NULL,PRIMARY KEY(user_id,item_id),FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
@@ -1091,6 +1092,26 @@ export function deleteInstanceEmoji(id, guildId = undefined) {
       .run(id, guildId).changes > 0
   );
 }
+export function listGuildStickers(guildId) {
+  return db.prepare(
+    "SELECT id,name,asset_id,creator_id,guild_id,created_at FROM instance_stickers WHERE guild_id=? ORDER BY name COLLATE NOCASE",
+  ).all(guildId).map((sticker) => ({
+    ...sticker,
+    url: `/api/v1/assets/${sticker.asset_id}`,
+    mime_type: db.prepare("SELECT mime_type FROM assets WHERE id=?").get(sticker.asset_id)?.mime_type || "image/png",
+  }));
+}
+export function createGuildSticker({ id, name, assetId, creatorId, guildId }) {
+  const createdAt = new Date().toISOString();
+  db.prepare(
+    "INSERT INTO instance_stickers(id,name,asset_id,creator_id,guild_id,created_at) VALUES(?,?,?,?,?,?)",
+  ).run(id, name, assetId, creatorId, guildId, createdAt);
+  const mimeType = db.prepare("SELECT mime_type FROM assets WHERE id=?").get(assetId)?.mime_type || "image/png";
+  return { id, name, asset_id: assetId, creator_id: creatorId, guild_id: guildId, created_at: createdAt, mime_type: mimeType, url: `/api/v1/assets/${assetId}` };
+}
+export function deleteGuildSticker(id, guildId) {
+  return db.prepare("DELETE FROM instance_stickers WHERE id=? AND guild_id=?").run(id, guildId).changes > 0;
+}
 export function listSocialPosts() {
   return db
     .prepare(
@@ -1653,6 +1674,7 @@ export function communityFederationSnapshot(guildId, domain) {
     // Custom emoji metadata travels with the community snapshot. URLs are
     // absolute so a federated client can load the asset from its owner.
     guild_emojis: listGuildEmojis(guildId).map((emoji) => ({ ...emoji, url: `${origin}/api/v1/assets/${emoji.asset_id}` })),
+    guild_stickers: listGuildStickers(guildId).map((sticker) => ({ ...sticker, url: `${origin}/api/v1/assets/${sticker.asset_id}` })),
     permission_overrides: listPermissionOverrides(guildId),
     members: db.prepare("SELECT guild_id,user_id,nickname,joined_at FROM guild_members WHERE guild_id=?").all(guildId),
     member_roles: db.prepare("SELECT guild_id,user_id,role_id FROM member_roles WHERE guild_id=?").all(guildId),

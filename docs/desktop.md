@@ -10,7 +10,7 @@ npm run dev
 npm run desktop
 ```
 
-`DESKTOP_CLIENT_URL` selects the renderer URL during development. `DESKTOP_HOME_SERVER` supplies the initial instance, while the user's chosen home instance is saved locally until logout/state reset.
+`DESKTOP_CLIENT_URL` selects the renderer URL during development. `DESKTOP_HOME_SERVER` supplies the initial instance, while the user's chosen home instance is saved locally until logout/state reset. The launch picker loads the public instance directory and lets people search/select an instance or enter a custom URL.
 
 In packaged production, leave `DESKTOP_CLIENT_URL` unset so the package can load its intended production renderer rather than requiring the Vite server on port 5173. An `ERR_CONNECTION_REFUSED` for `localhost:5173` means the desktop process was configured for development but Vite was not running.
 

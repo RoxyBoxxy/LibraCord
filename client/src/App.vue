@@ -41,6 +41,11 @@ import {
   faMusic,
   faFilm,
   faXmark,
+  faFaceSmile,
+  faNoteSticky,
+  faMagnifyingGlass,
+  faClock,
+  faChevronDown,
 } from "@fortawesome/free-solid-svg-icons";
 function normalizeApiPath(value) {
   return String(value || "")
@@ -136,15 +141,22 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   imageLightbox = ref(null),
   soundEnabled = ref(true),
   emojiPickerOpen = ref(false),
+  pickerTab = ref("emoji"),
   customEmojis = ref([]),
   guildEmojis = ref([]),
   federatedGuildEmojis = ref([]),
   emojiSearch = ref(""),
+  stickerSearch = ref(""),
+  guildStickers = ref([]),
+  federatedGuildStickers = ref([]),
+  recentStickers = ref([]),
   collapsedEmojiGroups = ref({}),
   emojiName = ref(""),
   emojiFile = ref(null),
   guildEmojiName = ref(""),
   guildEmojiFile = ref(null),
+  guildStickerName = ref(""),
+  guildStickerFile = ref(null),
   instanceEmojiName = ref("LibraCord"),
   voiceRoom = ref(null),
   voiceStatus = ref(""),
@@ -691,6 +703,23 @@ async function beginSession(nextUser) {
     emojiLists.flatMap((result) => result.status === "fulfilled" ? (result.value.guild_emojis || []) : [])
       .map((emoji) => [emoji.id, emoji]),
   ).values()];
+  const stickerResult = await api(
+    `/api/v1/stickers${activeCommunityId.value ? `?guildId=${activeCommunityId.value}` : ""}`,
+  );
+  guildStickers.value = stickerResult.guild_stickers || [];
+  const stickerLists = await Promise.allSettled(
+    communities.value.map(async (guild) => ({ guild, result: await api(`/api/v1/stickers?guildId=${encodeURIComponent(guild.id)}`) })),
+  );
+  federatedGuildStickers.value = stickerLists.flatMap((result) => {
+    if (result.status !== "fulfilled") return [];
+    const { guild, result: payload } = result.value;
+    return (payload.guild_stickers || []).map((sticker) => ({
+      ...sticker, community_id: guild.id, community_name: guild.name, community_icon_url: guild.icon_url,
+    }));
+  });
+  try {
+    recentStickers.value = JSON.parse(localStorage.getItem(`libracord-stickers:${serverOrigin || location.origin}:${nextUser.id}`) || "[]");
+  } catch { recentStickers.value = []; }
   instanceEmojiName.value = emojiResult.instance;
   publishedItems.value = (await api("/api/v1/home/federated")).items;
   await refreshFriends();
@@ -726,13 +755,14 @@ async function beginSession(nextUser) {
     if (activeCommunityId.value) guildRoles.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/roles`)).roles;
     if (activeCommunityId.value) guildCategories.value = (await api(`/api/v1/guilds/${encodeURIComponent(activeCommunityId.value)}/categories`)).categories;
   }
-  if (savedNavigation?.page === "home") {
+  const restoredFromUrl = await restoreConversationFromUrl();
+  if (!restoredFromUrl && savedNavigation?.page === "home") {
     await openHome(savedNavigation.homeTab || "feed");
     if (savedNavigation.homeTab === "dm" && savedNavigation.dmUserId) {
       const target = openDmUsers.value.find((item) => item.id === savedNavigation.dmUserId) || friends.value.find((item) => item.id === savedNavigation.dmUserId);
       if (target) await openDm(target);
     }
-  } else {
+  } else if (!restoredFromUrl) {
     const activeGuild = communities.value.find((guild) => guild.id === activeCommunityId.value);
     const restored = activeGuild?.channels?.find((channel) => channel.id === savedNavigation?.channelId);
     const first = restored || activeGuild?.channels?.find((c) => c.kind === "text");
@@ -754,6 +784,53 @@ function dropFriendIntoGroup(event, group) { event.preventDefault(); const id = 
 function friendsForActiveGroup() { const group = friendGroups.value.find((item) => item.id === activeFriendGroup.value); return group ? friends.value.filter((friend) => group.members?.includes(friend.id)) : friends.value; }
 const dmKeyStorage = () => `libracord-dm-key:${serverOrigin || location.origin}`;
 function bytesToBase64(bytes) { let binary = ""; bytes.forEach((b) => { binary += String.fromCharCode(b); }); return btoa(binary); }
+let restoringBrowserRoute = false;
+function routePart(value) { return encodeURIComponent(String(value || "")); }
+function conversationPath() {
+  if (page.value === "home" && homeTab.value === "dm")
+    return `/channels/@me${dmTarget.value?.id ? `/${routePart(dmTarget.value.id)}` : ""}`;
+  if (page.value === "chat" && activeCommunity.value?.id && selected.value?.id)
+    return `/channels/${routePart(activeCommunity.value.id)}/${routePart(selected.value.id)}`;
+  return "/";
+}
+function updateConversationUrl({ replace = false } = {}) {
+  if (restoringBrowserRoute) return;
+  const path = conversationPath();
+  if (location.pathname === path) return;
+  history[replace ? "replaceState" : "pushState"]({}, "", `${path}${location.search}`);
+}
+function decodedRoutePart(value) {
+  try { return decodeURIComponent(value); } catch { return ""; }
+}
+async function restoreConversationFromUrl() {
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts[0] !== "channels" || !parts[1]) return false;
+  restoringBrowserRoute = true;
+  try {
+    if (parts[1] === "@me") {
+      await openHome("dm", { updateUrl: false });
+      const userId = decodedRoutePart(parts[2]);
+      if (!userId) return true;
+      const target = openDmUsers.value.find((item) => String(item.id) === userId)
+        || friends.value.find((item) => String(item.id) === userId)
+        || { id: userId, display_name: "Direct message", username: "" };
+      await openDm(target, { updateUrl: false });
+      return true;
+    }
+    const communityId = decodedRoutePart(parts[1]);
+    const channelId = decodedRoutePart(parts[2]);
+    const guild = communities.value.find((item) => String(item.id) === communityId);
+    const channel = guild?.channels?.find((item) => String(item.id) === channelId);
+    if (!guild || !channel) return false;
+    await chooseGuild(guild, { channelId, updateUrl: false });
+    return true;
+  } finally {
+    restoringBrowserRoute = false;
+  }
+}
+function handleBrowserPopstate() {
+  if (user.value) void restoreConversationFromUrl().catch(() => {});
+}
 function base64ToBytes(value) { return Uint8Array.from(atob(value), (c) => c.charCodeAt(0)); }
 async function ensureDmKey() {
   if (dmPrivateKey.value && dmPublicKey.value) return;
@@ -816,7 +893,7 @@ async function dmSharedKey(otherId) {
 }
 async function encryptDm(body, otherId) { const key = await dmSharedKey(otherId), iv = crypto.getRandomValues(new Uint8Array(12)), data = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(body)); return `e2ee:v1:${bytesToBase64(iv)}:${bytesToBase64(new Uint8Array(data))}`; }
 async function decryptDm(value, otherId) { if (!String(value).startsWith("e2ee:v1:")) return value; try { const [, , iv, payload] = String(value).split(":"); const data = await crypto.subtle.decrypt({ name: "AES-GCM", iv: base64ToBytes(iv) }, await dmSharedKey(otherId), base64ToBytes(payload)); return new TextDecoder().decode(data); } catch { return "[Unable to decrypt message]"; } }
-async function openDm(target) {
+async function openDm(target, { updateUrl = true } = {}) {
   if (!target?.id) return;
   dmTarget.value = target;
   if (!openDmUsers.value.some((item) => item.id === target.id)) openDmUsers.value.push(target);
@@ -826,6 +903,7 @@ async function openDm(target) {
   dmMessages.value = (await api(`/api/v1/dms/${encodeURIComponent(target.id)}`)).messages || [];
   await ensureDmKey();
   dmMessages.value = await Promise.all(dmMessages.value.map(async (message) => ({ ...message, body: await decryptDm(message.body, message.sender_id === user.value.id ? target.id : message.sender_id) })));
+  if (updateUrl) updateConversationUrl();
 }
 async function sendDm() {
   if (!dmTarget.value || !dmDraft.value.trim()) return;
@@ -928,7 +1006,7 @@ async function logout() {
 function isRemoteCommunity(community = activeCommunity.value) {
   return Boolean(community?.remote || String(community?.id || "").includes("#"));
 }
-async function selectChannel(channel) {
+async function selectChannel(channel, { updateUrl = true } = {}) {
   page.value = "chat";
   mobileNavOpen.value = false;
   if (selected.value) socket.emit("channel:leave", selected.value.id);
@@ -943,6 +1021,7 @@ async function selectChannel(channel) {
     await leaveVoice();
   }
   selected.value = channel;
+  if (updateUrl) updateConversationUrl();
   clearInterval(messageRefreshTimer.value);
   if (channel.kind === "text") {
     const next = { ...unreadChannels.value }; delete next[channel.id]; unreadChannels.value = next;
@@ -1066,18 +1145,23 @@ function chooseEmoji(value) {
 }
 function openReactionPicker(message) {
   reactionMessageId.value = message.id;
+  pickerTab.value = "emoji";
   emojiSearch.value = "";
   emojiPickerOpen.value = true;
 }
 function closeEmojiPicker() {
   emojiPickerOpen.value = false;
   reactionMessageId.value = null;
+  pickerTab.value = "emoji";
   emojiSearch.value = "";
+  stickerSearch.value = "";
 }
 function toggleComposerEmojiPicker() {
   const opening = !emojiPickerOpen.value || Boolean(reactionMessageId.value);
   reactionMessageId.value = null;
+  pickerTab.value = "emoji";
   emojiSearch.value = "";
+  stickerSearch.value = "";
   emojiPickerOpen.value = opening;
 }
 function filteredDefaultEmojis(group) {
@@ -1088,6 +1172,38 @@ function filteredDefaultEmojis(group) {
 function filteredCustomEmojis(list = customEmojis.value) {
   const search = emojiSearch.value.trim().toLowerCase();
   return search ? list.filter((emoji) => emoji.name.includes(search)) : list;
+}
+function filteredStickers(list = federatedGuildStickers.value) {
+  const search = stickerSearch.value.trim().toLowerCase();
+  return search ? list.filter((sticker) => sticker.name.toLowerCase().includes(search)) : list;
+}
+function stickerGroups() {
+  const groups = new Map();
+  for (const sticker of filteredStickers()) {
+    const key = sticker.community_id || sticker.guild_id;
+    if (!groups.has(key)) groups.set(key, { id: key, name: sticker.community_name || activeCommunity.value?.name || "Community", icon: sticker.community_icon_url, stickers: [] });
+    groups.get(key).stickers.push(sticker);
+  }
+  return [...groups.values()];
+}
+function rememberSticker(sticker) {
+  const next = [sticker, ...recentStickers.value.filter((item) => item.id !== sticker.id)].slice(0, 18);
+  recentStickers.value = next;
+  if (user.value) localStorage.setItem(`libracord-stickers:${serverOrigin || location.origin}:${user.value.id}`, JSON.stringify(next));
+}
+async function chooseSticker(sticker) {
+  if (reactionMessageId.value) return;
+  rememberSticker(sticker);
+  pendingAttachments.value = [...pendingAttachments.value, {
+    id: `sticker:${sticker.id}`,
+    url: sticker.url,
+    name: sticker.name,
+    mimeType: sticker.mime_type || "image/png",
+    sticker: true,
+  }];
+  emojiPickerOpen.value = false;
+  stickerSearch.value = "";
+  if (!draft.value.trim()) await sendMessage();
 }
 function formatDiscordTimestamp(unix, style = "f") {
   const date = new Date(Number(unix) * 1000);
@@ -1204,6 +1320,37 @@ async function removeGuildEmoji(emoji) {
   });
   guildEmojis.value = guildEmojis.value.filter((item) => item.id !== emoji.id);
   socket.emit("emoji:changed", { communityId: activeCommunity.value.id });
+}
+async function uploadGuildSticker() {
+  if (!guildStickerFile.value || !guildStickerName.value.trim()) return;
+  try {
+    const form = new FormData();
+    form.append("name", guildStickerName.value);
+    form.append("image", guildStickerFile.value);
+    const response = await fetch(
+      apiEndpoint(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/stickers`),
+      { method: "POST", credentials: "include", body: form },
+    );
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Sticker upload failed");
+    const sticker = { ...result.sticker, community_id: activeCommunity.value.id, community_name: activeCommunity.value.name, community_icon_url: activeCommunity.value.icon_url };
+    guildStickers.value.push(sticker);
+    federatedGuildStickers.value = [...federatedGuildStickers.value, sticker];
+    socket.emit("sticker:changed", { communityId: activeCommunity.value.id });
+    socket.emit("community:changed", { communityId: activeCommunity.value.id });
+    guildStickerName.value = "";
+    guildStickerFile.value = null;
+    saved.value = "Community sticker uploaded";
+  } catch (uploadError) {
+    error.value = uploadError.message;
+  }
+}
+async function removeGuildSticker(sticker) {
+  await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/stickers/${encodeURIComponent(sticker.id)}`, { method: "DELETE" });
+  guildStickers.value = guildStickers.value.filter((item) => item.id !== sticker.id);
+  federatedGuildStickers.value = federatedGuildStickers.value.filter((item) => item.id !== sticker.id);
+  socket.emit("sticker:changed", { communityId: activeCommunity.value.id });
+  socket.emit("community:changed", { communityId: activeCommunity.value.id });
 }
 async function joinVoice(channel) {
   await leaveVoice();
@@ -2088,7 +2235,7 @@ async function importDiscordTemplate() {
   } catch (e) { error.value = e.message; }
   finally { discordTemplateBusy.value = false; }
 }
-async function chooseGuild(guild) {
+async function chooseGuild(guild, { channelId = "", updateUrl = true } = {}) {
   communityMenuOpen.value = false;
   page.value = "chat";
   activeCommunityId.value = guild.id;
@@ -2097,11 +2244,16 @@ async function chooseGuild(guild) {
     guildRoles.value = guild.roles || [];
     guildCategories.value = guild.categories || [];
     guildEmojis.value = guild.guild_emojis || (await api(`/api/v1/emojis?guildId=${encodeURIComponent(guild.id)}`)).guild_emojis || [];
+    guildStickers.value = guild.guild_stickers || (await api(`/api/v1/stickers?guildId=${encodeURIComponent(guild.id)}`)).guild_stickers || [];
+    federatedGuildStickers.value = [
+      ...new Map([...federatedGuildStickers.value, ...guildStickers.value.map((sticker) => ({ ...sticker, community_id: guild.id, community_name: guild.name, community_icon_url: guild.icon_url }))].map((sticker) => [sticker.id, sticker])).values(),
+    ];
     federatedGuildEmojis.value = [
       ...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values(),
     ];
-    const firstRemoteChannel = guild.channels?.find((channel) => channel.kind === "text") || guild.channels?.find((channel) => channel.kind === "voice");
-    if (firstRemoteChannel) await selectChannel(firstRemoteChannel);
+    const firstRemoteChannel = guild.channels?.find((channel) => String(channel.id) === String(channelId))
+      || guild.channels?.find((channel) => channel.kind === "text") || guild.channels?.find((channel) => channel.kind === "voice");
+    if (firstRemoteChannel) await selectChannel(firstRemoteChannel, { updateUrl });
     return;
   }
   guildMembers.value = (
@@ -2112,13 +2264,20 @@ async function chooseGuild(guild) {
   guildEmojis.value = (
     await api(`/api/v1/emojis?guildId=${encodeURIComponent(guild.id)}`)
   ).guild_emojis;
+  guildStickers.value = (
+    await api(`/api/v1/stickers?guildId=${encodeURIComponent(guild.id)}`)
+  ).guild_stickers;
+  federatedGuildStickers.value = [
+    ...new Map([...federatedGuildStickers.value, ...guildStickers.value.map((sticker) => ({ ...sticker, community_id: guild.id, community_name: guild.name, community_icon_url: guild.icon_url }))].map((sticker) => [sticker.id, sticker])).values(),
+  ];
   federatedGuildEmojis.value = [
     ...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values(),
   ];
-  const first = guild.channels.find((channel) => channel.kind === "text");
-  if (first) await selectChannel(first);
+  const first = guild.channels.find((channel) => String(channel.id) === String(channelId))
+    || guild.channels.find((channel) => channel.kind === "text");
+  if (first) await selectChannel(first, { updateUrl });
 }
-async function openHome(tab = "feed") {
+async function openHome(tab = "feed", { updateUrl = true } = {}) {
   // Home is a clean top-level surface; dismiss overlays from the previous community.
   channelMenu.value = null;
   appMenu.value = null;
@@ -2147,6 +2306,7 @@ async function openHome(tab = "feed") {
     discoverCommunities.value = (
       await api("/api/v1/discovery/communities")
     ).communities;
+  if (updateUrl) updateConversationUrl();
 }
 async function publishStatus() {
   if (!homePostDraft.value.trim() && !homePostAttachments.value.length) return;
@@ -3177,6 +3337,16 @@ socket.on("emoji:changed", async ({ communityId } = {}) => {
     federatedGuildEmojis.value = [...new Map([...federatedGuildEmojis.value, ...guildEmojis.value].map((emoji) => [emoji.id, emoji])).values()];
   } catch {}
 });
+socket.on("sticker:changed", async ({ communityId } = {}) => {
+  if (communityId && String(communityId) !== String(activeCommunityId.value)) return;
+  try {
+    const result = await api(`/api/v1/stickers${activeCommunityId.value ? `?guildId=${activeCommunityId.value}` : ""}`);
+    guildStickers.value = result.guild_stickers || [];
+    federatedGuildStickers.value = [
+      ...new Map([...federatedGuildStickers.value.filter((sticker) => String(sticker.community_id || sticker.guild_id) !== String(activeCommunityId.value)), ...guildStickers.value.map((sticker) => ({ ...sticker, community_id: activeCommunityId.value, community_name: activeCommunity.value?.name, community_icon_url: activeCommunity.value?.icon_url }))].map((sticker) => [sticker.id, sticker])).values(),
+    ];
+  } catch {}
+});
 socket.on("voice:presence-changed", (communityId) => {
   if (String(communityId) === String(activeCommunityId.value)) refreshVoicePresence();
 });
@@ -3288,6 +3458,7 @@ onMounted(async () => {
       mediaPosition.value = mediaSession.value.position + Math.max(0, (Date.now() - mediaSession.value.updatedAt) / 1000);
   }, 500);
   window.addEventListener("keydown", handleLightboxKey);
+  window.addEventListener("popstate", handleBrowserPopstate);
   try {
     const codecs = window.RTCRtpSender?.getCapabilities?.("audio")?.codecs || [];
     const seen = new Set();
@@ -3316,6 +3487,7 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleLightboxKey);
+  window.removeEventListener("popstate", handleBrowserPopstate);
   clearInterval(networkTimer);
   clearInterval(mediaClockTimer);
   clearInterval(friendRefreshTimer.value);
@@ -3845,7 +4017,7 @@ watch(
             </p>
             <div v-if="message.content_warning" class="message-warning">{{ message.content_warning }}</div>
             <div v-if="message.attachments?.length" class="message-attachments">
-              <figure v-for="attachment in message.attachments" :key="attachment.id" class="message-attachment">
+              <figure v-for="attachment in message.attachments" :key="attachment.id" class="message-attachment" :class="{ 'message-sticker-attachment': attachment.sticker }">
                 <img :class="{ blurred: message.content_warning && !revealedAttachments[`${message.id}:${attachment.id}`] }" :src="apiEndpoint(attachment.url)" :alt="attachment.name" tabindex="0" role="button" @click="(!message.content_warning || revealedAttachments[`${message.id}:${attachment.id}`]) && openImageLightbox(attachment.url, attachment.name)" @keydown.enter="(!message.content_warning || revealedAttachments[`${message.id}:${attachment.id}`]) && openImageLightbox(attachment.url, attachment.name)" />
                 <button v-if="message.content_warning" type="button" class="attachment-reveal" :title="revealedAttachments[`${message.id}:${attachment.id}`] ? 'Hide image' : 'Show image'" @click="toggleAttachment(message.id, attachment.id)"><FontAwesomeIcon :icon="revealedAttachments[`${message.id}:${attachment.id}`] ? faEyeSlash : faEye" /> {{ revealedAttachments[`${message.id}:${attachment.id}`] ? 'Hide image' : 'Show image' }}</button>
                 <figcaption>{{ attachment.name }}</figcaption>
@@ -3979,10 +4151,46 @@ watch(
       </aside>
       <aside v-if="emojiPickerOpen" class="emoji-picker">
         <header>
-          <input v-model="emojiSearch" placeholder="Find the perfect emoji" />
-          <button @click="closeEmojiPicker">×</button>
+          <nav class="picker-tabs" aria-label="Expression picker">
+            <button type="button" title="GIFs" aria-label="GIFs" :class="{ active: pickerTab === 'gif' }" @click="pickerTab = 'gif'"><FontAwesomeIcon :icon="faFilm" /></button>
+            <button type="button" title="Stickers" aria-label="Stickers" :class="{ active: pickerTab === 'sticker' }" @click="pickerTab = 'sticker'"><FontAwesomeIcon :icon="faNoteSticky" /></button>
+            <button type="button" title="Emoji" aria-label="Emoji" :class="{ active: pickerTab === 'emoji' }" @click="pickerTab = 'emoji'"><FontAwesomeIcon :icon="faFaceSmile" /></button>
+          </nav>
+          <div class="picker-search-row">
+            <FontAwesomeIcon :icon="faMagnifyingGlass" />
+            <input v-if="pickerTab === 'emoji'" v-model="emojiSearch" placeholder="Find the perfect emoji" />
+            <input v-else-if="pickerTab === 'sticker'" v-model="stickerSearch" placeholder="Find the perfect sticker" />
+            <input v-else placeholder="Search GIFs" disabled />
+            <button type="button" title="Close picker" aria-label="Close picker" @click="closeEmojiPicker"><FontAwesomeIcon :icon="faXmark" /></button>
+          </div>
         </header>
-        <div class="emoji-scroll">
+        <div v-if="pickerTab === 'gif'" class="picker-empty">GIF search is coming soon.</div>
+        <div v-else-if="pickerTab === 'sticker'" class="emoji-scroll sticker-scroll">
+          <section v-if="!stickerSearch && recentStickers.length" class="emoji-category">
+            <button class="emoji-category-heading" type="button" @click="toggleEmojiGroup('recent-stickers')">
+              <FontAwesomeIcon :icon="faClock" /> Frequently Used <b><FontAwesomeIcon :icon="faChevronDown" :rotation="collapsedEmojiGroups['recent-stickers'] ? 270 : 0" /></b>
+            </button>
+            <div v-if="!collapsedEmojiGroups['recent-stickers']" class="sticker-grid">
+              <button v-for="sticker in recentStickers" :key="`recent-${sticker.id}`" type="button" :title="sticker.name" @click="chooseSticker(sticker)">
+                <img :src="apiEndpoint(sticker.url)" :alt="sticker.name" />
+              </button>
+            </div>
+          </section>
+          <section v-for="group in stickerGroups()" :key="`sticker-group-${group.id}`" class="emoji-category">
+            <button class="emoji-category-heading" type="button" @click="toggleEmojiGroup(`sticker-${group.id}`)">
+              <span v-if="group.icon" class="sticker-community-icon"><img :src="apiEndpoint(group.icon)" alt="" /></span>
+              <span v-else class="emoji-instance-icon">{{ group.name[0]?.toUpperCase() }}</span>
+              {{ group.name }} <b><FontAwesomeIcon :icon="faChevronDown" :rotation="collapsedEmojiGroups[`sticker-${group.id}`] ? 270 : 0" /></b>
+            </button>
+            <div v-if="!collapsedEmojiGroups[`sticker-${group.id}`]" class="sticker-grid">
+              <button v-for="sticker in group.stickers" :key="sticker.id" type="button" :title="sticker.name" @click="chooseSticker(sticker)">
+                <img :src="apiEndpoint(sticker.url)" :alt="sticker.name" />
+              </button>
+            </div>
+          </section>
+          <p v-if="!recentStickers.length && !stickerGroups().length" class="picker-empty">No community stickers yet.</p>
+        </div>
+        <div v-else class="emoji-scroll">
           <section v-if="federatedGuildEmojis.length" class="emoji-category">
             <button
               class="emoji-category-heading"
@@ -5018,7 +5226,7 @@ watch(
           :class="{ selected: guildSettingsTab === 'emoji' }"
           @click="guildSettingsTab = 'emoji'"
         >
-          Emoji
+              Emoji & stickers
         </button>
         <span class="settings-group">Moderation</span
         ><button
@@ -5506,6 +5714,19 @@ watch(
             <p v-if="!guildEmojis.length" class="empty">
               This community has no custom emoji yet.
             </p>
+          </div>
+          <h2 class="sticker-settings-heading">Stickers</h2>
+          <p>Upload PNG, JPG, or animated GIF stickers members can use in this community.</p>
+          <div class="emoji-upload-row community-emoji-upload">
+            <input v-model="guildStickerName" placeholder="sticker_name" maxlength="32" />
+            <label class="upload-button">Choose image<input type="file" accept="image/png,image/jpeg,image/gif" @change="guildStickerFile = $event.target.files?.[0] || null" /></label>
+            <button class="primary" @click="uploadGuildSticker">Upload Sticker</button>
+          </div>
+          <div class="emoji-admin-grid sticker-admin-grid">
+            <article v-for="sticker in guildStickers" :key="sticker.id">
+              <img :src="apiEndpoint(sticker.url)" :alt="sticker.name" /><span>{{ sticker.name }}</span><button class="danger" @click="removeGuildSticker(sticker)">Remove</button>
+            </article>
+            <p v-if="!guildStickers.length" class="empty">This community has no stickers yet.</p>
           </div>
         </template>
         <template v-else-if="guildSettingsTab === 'safety'">

@@ -58,7 +58,7 @@ The API returns errors as `{ "error": "message" }`. Typical status codes are `40
 | `PATCH` | `/api/v1/admin/moderation/reports/:id` | Admin | Review, action, or dismiss a report |
 | `POST` | `/api/v1/reports` | User | Report a user, message, community, or peer |
 
-## Home, publishing, and emoji
+## Home, publishing, emoji, and stickers
 
 | Method | Path | Description |
 | --- | --- | --- |
@@ -71,6 +71,8 @@ The API returns errors as `{ "error": "message" }`. Typical status codes are `40
 | `GET` | `/api/v1/emojis` | List available instance/community emoji |
 | `POST|DELETE` | `/api/v1/admin/emojis[/:id]` | Create/delete instance emoji |
 | `POST|DELETE` | `/api/v1/guilds/:id/emojis[/:emojiId]` | Manage community emoji |
+| `GET` | `/api/v1/stickers?guildId=:id` | List stickers uploaded to a community, including federated communities |
+| `POST|DELETE` | `/api/v1/guilds/:id/stickers[/:stickerId]` | Manage community stickers |
 
 ## Communities and channels
 

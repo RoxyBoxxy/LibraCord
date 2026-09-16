@@ -97,6 +97,7 @@ io.on("connection", (socket) => {
     ack({ ok: true, reactions: next });
   });
   socket.on("emoji:changed", ({ communityId } = {}) => io.emit("emoji:changed", { communityId: String(communityId || "") }));
+  socket.on("sticker:changed", ({ communityId } = {}) => io.emit("sticker:changed", { communityId: String(communityId || "") }));
   socket.on("voice:changed", (id) => {
     const channel = findChannel(String(id || ""));
     if (channel?.kind === "voice" && userCanConnectToChannel(channel.id, socket.user.id))

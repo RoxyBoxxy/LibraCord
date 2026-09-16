@@ -63,6 +63,9 @@ import {
   listGuildEmojis,
   createInstanceEmoji,
   deleteInstanceEmoji,
+  listGuildStickers,
+  createGuildSticker,
+  deleteGuildSticker,
   listSocialPosts,
   createSocialPost, boostSocialPost,
   listPublishedItems,
@@ -1070,6 +1073,25 @@ export function createApp() {
       instance: getInstanceSettings().name,
     });
   });
+  app.get("/api/v1/stickers", async (req, res) => {
+    const viewer = getUser(req);
+    const remote = viewer && req.query.guildId ? remoteCommunityFor(viewer.id, req.query.guildId) : null;
+    if (remote) {
+      let guildStickers = remote.state?.guild_stickers || [];
+      if (!guildStickers.length) {
+        try {
+          const peer = findPeerByDomain(remote.origin);
+          const response = peer && await federationFetch(peer, `/api/v1/stickers?guildId=${encodeURIComponent(remote.remote_id)}`, { headers: { accept: "application/json" } });
+          if (response?.ok) {
+            const payload = await response.json();
+            guildStickers = (payload.guild_stickers || []).map((sticker) => ({ ...sticker, url: sticker.url ? new URL(sticker.url, peer.base_url).href : sticker.url }));
+          }
+        } catch { /* stale peer or empty sticker set */ }
+      }
+      return res.json({ stickers: [], guild_stickers: guildStickers });
+    }
+    return res.json({ stickers: [], guild_stickers: req.query.guildId ? listGuildStickers(req.query.guildId) : [] });
+  });
   app.post("/api/v1/admin/emojis", requireAdmin, (req, res) => {
     if (req.user.role !== "owner")
       return res.status(403).json({ error: "Instance owner access required" });
@@ -1165,6 +1187,42 @@ export function createApp() {
       deleteInstanceEmoji(req.params.emojiId, req.params.id)
         ? res.status(204).end()
         : res.status(404).json({ error: "Emoji not found" }),
+  );
+  app.post(
+    "/api/v1/guilds/:id/stickers",
+    requireUser,
+    requireGuildPermission(Permissions.MANAGE_GUILD),
+    (req, res) => {
+      upload.single("image")(req, res, (error) => {
+        if (error) return res.status(400).json({ error: error.message });
+        const name = String(req.body?.name || "").trim().toLowerCase();
+        if (!/^[a-z0-9_]{2,32}$/.test(name))
+          return res.status(400).json({ error: "Sticker names use 2-32 letters, numbers, or underscores" });
+        if (!req.file || !detectedImageExtension(req.file.buffer))
+          return res.status(400).json({ error: "Choose a valid PNG, JPG, or GIF" });
+        try {
+          const asset = storeAsset(uploadsDirectory, {
+            buffer: req.file.buffer,
+            mimeType: req.file.mimetype,
+            kind: "guild-sticker",
+            ownerUserId: req.user.id,
+          });
+          return res.status(201).json({ sticker: createGuildSticker({
+            id: randomUUID(), name, assetId: asset.id, creatorId: req.user.id, guildId: req.params.id,
+          }) });
+        } catch {
+          return res.status(409).json({ error: "That sticker name already exists in this community" });
+        }
+      });
+    },
+  );
+  app.delete(
+    "/api/v1/guilds/:id/stickers/:stickerId",
+    requireUser,
+    requireGuildPermission(Permissions.MANAGE_GUILD),
+    (req, res) => deleteGuildSticker(req.params.stickerId, req.params.id)
+      ? res.status(204).end()
+      : res.status(404).json({ error: "Sticker not found" }),
   );
   app.patch("/api/v1/admin/instance", requireAdmin, (req, res) => {
     const current = getInstanceSettings(),
