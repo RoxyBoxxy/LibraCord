@@ -368,6 +368,26 @@ export function createApp() {
       String(remote.address) === requested
     )) || null;
   };
+  const assertRoleHierarchy = (guildId, actor, targetUserId, roleIds) => {
+    const community = findCommunity(guildId);
+    const roles = listGuildRoles(guildId);
+    const requested = [...new Set(roleIds.map(String))];
+    if (!community || requested.some((id) => !roles.some((role) => String(role.id) === id))) throw new Error("Invalid role assignment");
+    // The community owner and instance administrators are trusted to manage
+    // the full ladder. Everyone else can only change roles below their own.
+    if (community.owner_id === actor.id || ["owner", "admin"].includes(actor.role)) return requested;
+    if (community.owner_id === targetUserId) throw new Error("The community owner cannot have roles changed");
+    const actorTop = Math.max(-1, ...listUserGuildRoles(guildId, actor.id).filter((role) => !role.managed).map((role) => Number(role.position || 0)));
+    if (!String(targetUserId).includes("#")) {
+      const targetTop = Math.max(-1, ...listUserGuildRoles(guildId, targetUserId).filter((role) => !role.managed).map((role) => Number(role.position || 0)));
+      if (targetTop >= actorTop) throw new Error("You can only manage members below your highest role");
+    }
+    if (actorTop < 0 || requested.some((id) => {
+      const role = roles.find((item) => String(item.id) === id);
+      return role.managed || Number(role.position || 0) >= actorTop;
+    })) throw new Error("You can only assign roles below your highest role");
+    return requested;
+  };
   const requestRemoteChannel = async (req, channelId, action, input = {}) => {
     const match = remoteChannelFor(req.user.id, channelId);
     if (!match) return null;
@@ -1810,14 +1830,12 @@ export function createApp() {
     "/api/v1/guilds/:id/members/:userId/roles",
     requireUser,
     requireGuildPermission(Permissions.MANAGE_ROLES),
-    (req, res) =>
-      res.json({
-        role_ids: setMemberRoles(
-          req.params.id,
-          req.params.userId,
-          Array.isArray(req.body?.roleIds) ? req.body.roleIds : [],
-        ),
-      }),
+    (req, res, next) => {
+      try {
+        const roleIds = assertRoleHierarchy(req.params.id, req.user, req.params.userId, Array.isArray(req.body?.roleIds) ? req.body.roleIds : []);
+        return res.json({ role_ids: setMemberRoles(req.params.id, req.params.userId, roleIds) });
+      } catch (error) { return next(error); }
+    },
   );
   app.delete(
     "/api/v1/guilds/:id/members/:userId",

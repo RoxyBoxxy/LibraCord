@@ -391,6 +391,9 @@ const displayedGuildMembers = computed(() => {
     ? guildMembers.value.filter((member) => `${member.nickname || ""} ${member.display_name} ${member.username}`.toLowerCase().includes(query))
     : guildMembers.value;
 });
+const rolesByHierarchy = computed(() => [...guildRoles.value]
+  .filter((role) => !role.managed)
+  .sort((a, b) => Number(b.position || 0) - Number(a.position || 0) || String(a.name).localeCompare(String(b.name))));
 let dockObserver;
 function updateDockScroll() {
   const strip = communityStrip.value;
@@ -1627,7 +1630,7 @@ async function toggleMemberRole(role) {
   ids.has(role.id) ? ids.delete(role.id) : ids.add(role.id);
   try {
     const result = await api(`/api/v1/guilds/${encodeURIComponent(activeCommunity.value.id)}/members/${encodeURIComponent(targetId)}/roles`, { method: "PUT", body: JSON.stringify({ roleIds: [...ids] }) });
-    if (member) member.roles = (guildRoles.value || []).filter((item) => result.role_ids.includes(item.id));
+    if (member) member.roles = (guildRoles.value || []).filter((item) => result.role_ids.includes(item.id)).sort((a, b) => Number(b.position || 0) - Number(a.position || 0));
     emitCommunityChanged(activeCommunity.value.id);
   } catch (e) { error.value = e.message; }
 }
@@ -4872,12 +4875,12 @@ watch(
         Edit Per-server Profile
       </button>
       <button disabled title="App integrations are not available yet">Apps <span>›</span></button>
-      <button @click="userMenu = { ...userMenu, rolesOpen: !userMenu.rolesOpen }">
+      <button v-if="!isRemoteCommunity()" @click="userMenu = { ...userMenu, rolesOpen: !userMenu.rolesOpen }">
         Roles <span>›</span>
       </button>
-      <aside v-if="userMenu.rolesOpen && guildRoles.length" class="context-role-submenu">
+      <aside v-if="!isRemoteCommunity() && userMenu.rolesOpen && guildRoles.length" class="context-role-submenu">
         <small>Roles</small>
-        <button v-for="role in guildRoles.filter((item) => !item.managed)" :key="`assign-${role.id}`" @click="toggleMemberRole(role)">
+        <button v-for="role in rolesByHierarchy" :key="`assign-${role.id}`" @click="toggleMemberRole(role)">
           <i :style="{ background: role.color }"></i><span>{{ role.name }}</span><b :class="{ checked: userMenuHasRole(role) }">✓</b>
         </button>
       </aside>

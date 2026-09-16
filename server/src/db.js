@@ -722,7 +722,7 @@ export function listGuildRoles(guildId) {
 export function listUserGuildRoles(guildId, userId) {
   return db
     .prepare(
-      `SELECT r.id,r.name,r.color,r.position FROM guild_roles r
+      `SELECT r.id,r.name,r.color,r.position,r.managed FROM guild_roles r
        WHERE r.guild_id=? AND (r.managed=1 OR r.id IN
        (SELECT role_id FROM member_roles WHERE guild_id=? AND user_id=?))
        ORDER BY r.position DESC`,
