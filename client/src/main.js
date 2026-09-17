@@ -27,4 +27,5 @@ import "./mini-decoration.css";
 import "./design-v3.css";
 import "./mobile.css";
 import "./production.css";
+import "./responsive.css";
 createApp(App).mount("#app");

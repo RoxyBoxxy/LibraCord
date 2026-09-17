@@ -45,6 +45,7 @@ services:
     environment:
       LIVEKIT_CONFIG: |
         port: 7880
+        log_level: ${LIVEKIT_LOG_LEVEL:-warn}
         bind_addresses:
           - "0.0.0.0"
         rtc:
@@ -83,7 +84,7 @@ services:
       LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
       LIVEKIT_WS_URL: ws://livekit:7880
       INGRESS_CONFIG_BODY: |
-        log_level: info
+        log_level: ${LIVEKIT_LOG_LEVEL:-warn}
         ws_url: ws://livekit:7880
         redis:
           address: redis:6379

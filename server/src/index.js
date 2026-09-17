@@ -310,12 +310,19 @@ federationRetryTimer.unref();
 void deliverFederationOutbox();
 
 const directoryEnabled = String(process.env.DIRECTORY_ENABLED || "false").toLowerCase() === "true";
+let directoryHeartbeatFailed = false;
 const directoryRegister = async () => {
   if (!directoryEnabled || !process.env.DIRECTORY_URL) return;
   try {
     const settings = getInstanceSettings();
-    await fetch(new URL("/api/v1/instances/register", process.env.DIRECTORY_URL), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicUrl: process.env.PUBLIC_URL, name: settings.name, description: settings.shortDescription || settings.description, federationDomain: process.env.FEDERATION_DOMAIN, capabilities: ["federation", "realtime", "voice"] }), signal: AbortSignal.timeout(8000) });
-  } catch (error) { console.error("Directory heartbeat failed", error.message); }
+    const response = await fetch(new URL("/api/v1/instances/register", process.env.DIRECTORY_URL), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ publicUrl: process.env.PUBLIC_URL, name: settings.name, description: settings.shortDescription || settings.description, federationDomain: process.env.FEDERATION_DOMAIN, capabilities: ["federation", "realtime", "voice"] }), signal: AbortSignal.timeout(8000) });
+    if (!response.ok) throw new Error(`Directory returned ${response.status}`);
+    if (directoryHeartbeatFailed) console.info("Directory heartbeat restored");
+    directoryHeartbeatFailed = false;
+  } catch (error) {
+    if (!directoryHeartbeatFailed) console.warn("Directory heartbeat failed", error.message);
+    directoryHeartbeatFailed = true;
+  }
 };
 const directoryTimer = setInterval(directoryRegister, 60_000); directoryTimer.unref();
 void directoryRegister();

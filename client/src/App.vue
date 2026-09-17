@@ -205,7 +205,7 @@ const configuredServer = new URLSearchParams(window.location.search).get("server
   adminUsers = ref([]),
   adminModeration = ref({ bans: [], reports: [], actions: [], system_user: null }),
   guildDialog = ref(false),
-  mobileNavOpen = ref(true),
+  mobileNavOpen = ref(window.innerWidth > 899),
   guildWizardStep = ref("choose"),
   joinCommunityAddress = ref(""),
   discordTemplateUrl = ref(""),
@@ -3685,6 +3685,12 @@ socket.on("connect_error", () => {
     ? "Your internet connection is offline."
     : "The server is unavailable. Retrying…";
 });
+let wasCompactViewport = window.innerWidth <= 899;
+function handleResponsiveResize() {
+  const compact = window.innerWidth <= 899;
+  if (compact && !wasCompactViewport) mobileNavOpen.value = false;
+  wasCompactViewport = compact;
+}
 onMounted(async () => {
   mediaClockTimer = setInterval(() => {
     if (mediaSession.value?.playing && !sharedMediaElement.value)
@@ -3692,6 +3698,7 @@ onMounted(async () => {
   }, 500);
   window.addEventListener("keydown", handleLightboxKey);
   window.addEventListener("popstate", handleBrowserPopstate);
+  window.addEventListener("resize", handleResponsiveResize);
   try {
     const codecs = window.RTCRtpSender?.getCapabilities?.("audio")?.codecs || [];
     const seen = new Set();
@@ -3721,6 +3728,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleLightboxKey);
   window.removeEventListener("popstate", handleBrowserPopstate);
+  window.removeEventListener("resize", handleResponsiveResize);
   clearInterval(networkTimer);
   clearInterval(mediaClockTimer);
   clearInterval(friendRefreshTimer.value);

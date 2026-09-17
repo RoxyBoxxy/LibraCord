@@ -45,6 +45,11 @@ import {
 
 export const federationEvents = new EventEmitter();
 federationEvents.setMaxListeners(25);
+// Keep routine message, reaction, typing and snapshot traffic out of logs.
+// The event ID lets an operator correlate a lifecycle event with the outbox.
+function logFederationEvent(level, event, details) {
+  console[level](`[federation] ${event} ${JSON.stringify(details)}`);
+}
 
 function privateAddress(value) {
   return value === "::1" || value.startsWith("127.") || value.startsWith("10.") || value.startsWith("192.168.") ||
@@ -235,6 +240,7 @@ export async function publishCommunityDeleted(guildId, peers) {
 }
 
 let deliveringOutbox = false, deliveryRequested = false;
+const failedDeliveryPeers = new Set();
 export async function deliverFederationOutbox() {
   // If an event arrives while a batch is delivering, run another batch before
   // yielding. Otherwise live changes can sit until the 10-second retry tick.
@@ -253,7 +259,14 @@ export async function deliverFederationOutbox() {
           });
           if (!response.ok && response.status !== 409) throw new Error(`Peer returned ${response.status}`);
           markFederationDelivery(item.event_id, item.peer_id, true);
-        } catch (error) { markFederationDelivery(item.event_id, item.peer_id, false, error.message); }
+          if (failedDeliveryPeers.delete(item.peer_id)) logFederationEvent("info", "delivery-restored", { peer: item.base_url });
+        } catch (error) {
+          markFederationDelivery(item.event_id, item.peer_id, false, error.message);
+          if (!failedDeliveryPeers.has(item.peer_id)) {
+            failedDeliveryPeers.add(item.peer_id);
+            logFederationEvent("warn", "delivery-retrying", { peer: item.base_url, error: error.message });
+          }
+        }
       }));
       delivered += due.length;
     } while (deliveryRequested);
@@ -374,9 +387,12 @@ export async function processIncomingEnvelope(envelope) {
     } else if (envelope.type === "identity.migration") saveRemoteIdentity(identityFromPayload(envelope.payload.identity, envelope.origin));
     else throw new Error(`Unsupported federation event type: ${envelope.type}`);
     markFederationEvent(envelope.event_id, "processed");
+    if (["membership.join.request", "membership.leave.request", "community.delete"].includes(envelope.type))
+      logFederationEvent("info", "received", { type: envelope.type, origin: envelope.origin, event_id: envelope.event_id });
     return { accepted: true, event_id: envelope.event_id };
   } catch (error) {
     markFederationEvent(envelope.event_id, "rejected", error.message);
+    logFederationEvent("warn", "rejected", { type: envelope.type, origin: envelope.origin, event_id: envelope.event_id, error: error.message });
     throw error;
   }
 }

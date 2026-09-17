@@ -1,0 +1,186 @@
+/* Window and phone layout adjustments. Loaded after the feature styles. */
+.libracord-canvas,
+.chat,
+.home-hub,
+.admin,
+.settings-overlay,
+.settings-content,
+.settings-workspace-body { min-width: 0; min-height: 0; }
+
+.resource-list article,
+.peer-list article,
+.developer-app,
+.voice-activity-tile footer { min-width: 0; }
+.resource-list article strong,
+.resource-list article small,
+.peer-list article > div,
+.developer-app > div { min-width: 0; overflow-wrap: anywhere; }
+.settings-content code,
+.resource-list code { overflow-wrap: anywhere; white-space: normal; }
+.role-colors { grid-template-columns: repeat(auto-fit, 32px); }
+.role-styles { flex-wrap: wrap; }
+.role-editor > nav { max-width: 100%; overflow-x: auto; scrollbar-width: thin; }
+.role-picker-channel { width: min(760px, calc(100% - 24px)); max-height: 100%; overflow-y: auto; }
+.voice-activity-menu { max-width: calc(100vw - 24px); }
+.voice-activity-tile footer { flex-wrap: wrap; }
+.voice-activity-tile footer small { flex: 1 1 150px; }
+.jsdos-activity-stage { min-width: 0; overflow: hidden; }
+
+@media (max-width: 1100px) {
+  .instance-style-settings .profile-studio,
+  .instance-style-settings .server-profile-layout {
+    grid-template-columns: minmax(0, 1fr) !important;
+    gap: 22px;
+  }
+  .instance-style-settings .profile-live-preview,
+  .instance-style-settings .server-card-preview { position: static; }
+}
+
+@media (min-width: 621px) and (max-width: 899px) {
+  .mobile-nav-toggle { display: grid; flex: 0 0 40px; width: 40px; height: 40px; place-items: center; border: 1px solid var(--lc-border); border-radius: 10px; background: var(--lc-raised); color: var(--lc-text); }
+  .channels { visibility: hidden; transform: translateX(-115%); transition: transform .2s ease, visibility .2s ease; }
+  .mobile-nav-open .channels { visibility: visible; transform: translateX(0); }
+  .mobile-nav-open::before { position: fixed; z-index: 34; inset: 0; background: #02040a88; content: ""; }
+  .mobile-nav-close { position: absolute; z-index: 5; top: 10px; right: 10px; display: grid; width: 40px; height: 40px; place-items: center; border: 1px solid var(--lc-border); border-radius: 10px; background: var(--lc-raised); color: var(--lc-text); }
+  .channels > header { padding-right: 54px; }
+  .chat > header { gap: 8px; }
+  .channel-header-actions label { display: none; }
+  .community-account,
+  .top-voice-dock { visibility: hidden; transform: translateX(-115%); transition: transform .2s ease, visibility .2s ease; }
+  .mobile-nav-open .community-account,
+  .mobile-nav-open .top-voice-dock { visibility: visible; transform: translateX(0); }
+}
+
+@media (max-width: 760px) {
+  .settings-overlay,
+  .guild-settings-overlay,
+  .channel-settings-overlay,
+  .settings-overlay.instance-style-settings {
+    inset: 0 !important;
+    display: grid !important;
+    width: 100% !important;
+    height: 100dvh !important;
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: auto minmax(0, 1fr) !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+  }
+  .settings-overlay > .settings-nav,
+  .guild-settings-overlay > .settings-nav,
+  .channel-settings-overlay > .settings-nav,
+  .instance-style-settings > .settings-nav {
+    position: relative !important;
+    display: flex !important;
+    grid-column: 1 !important;
+    grid-row: 1 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 54px;
+    max-height: 76px !important;
+    padding: 7px 54px 7px 8px !important;
+    gap: 4px;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    border: 0 !important;
+    border-bottom: 1px solid var(--lc-border) !important;
+    box-shadow: none !important;
+    scrollbar-width: thin;
+  }
+  .settings-overlay > .settings-nav h3,
+  .settings-overlay > .settings-nav .settings-nav-description,
+  .settings-overlay > .settings-nav .settings-group { display: none !important; }
+  .settings-overlay > .settings-nav button,
+  .instance-style-settings > .settings-nav button {
+    flex: 0 0 auto !important;
+    width: auto !important;
+    min-height: 38px !important;
+    margin: 0 !important;
+    padding: 8px 11px !important;
+    white-space: nowrap;
+  }
+  .settings-overlay > .settings-content,
+  .guild-settings-overlay > .settings-content,
+  .channel-settings-overlay > .settings-content,
+  .instance-style-settings > .settings-content {
+    grid-column: 1 !important;
+    grid-row: 2 !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    height: 100% !important;
+    padding: 16px !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
+  }
+  .instance-style-settings > .settings-content > .settings-workspace-header { padding: 18px 14px !important; }
+  .instance-style-settings > .settings-content > .settings-workspace-body { padding: 18px 14px 36px !important; }
+  .instance-style-settings .close-settings,
+  .settings-overlay .close-settings {
+    position: fixed !important;
+    z-index: 100 !important;
+    top: 8px !important;
+    right: 8px !important;
+    display: grid !important;
+    width: 38px !important;
+    height: 38px !important;
+  }
+  .role-workspace,
+  .profile-studio,
+  .server-profile-layout,
+  .permission-editor { display: block !important; }
+  .role-list-panel { max-height: 180px; overflow-y: auto; }
+  .role-editor { max-width: 100%; padding: 18px 10px; }
+  .resource-list article { flex-wrap: wrap; }
+  .resource-list article strong { flex: 1 1 100%; }
+  .resource-list article small { flex: 1 1 100%; }
+  .peer-form { grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+@media (max-width: 620px) {
+  .channels { width: 100% !important; }
+  .role-picker-channel { margin: 10px auto 74px; padding: 18px 14px; }
+  .voice-fullscreen .voice-bottom-toolbar {
+    display: grid !important;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    justify-items: center;
+    width: min(360px, calc(100% - 12px)) !important;
+    max-width: none !important;
+    margin: 0 auto;
+    overflow: visible !important;
+    transform: none !important;
+  }
+  .voice-fullscreen .voice-bottom-toolbar > button,
+  .voice-fullscreen .voice-bottom-toolbar > .voice-activity-menu-wrap > button { margin-bottom: 13px !important; }
+  .voice-fullscreen .voice-stage,
+  .voice-lobby-stage { bottom: 166px !important; }
+  .voice-activity-menu { bottom: 64px; left: 0; right: auto; width: min(270px, calc(100vw - 28px)); }
+  .voice-fullscreen .voice-bottom-toolbar .voice-activity-menu button {
+    display: flex !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 56px !important;
+    margin: 0 !important;
+    padding: 9px !important;
+    border-radius: 8px !important;
+  }
+  .voice-fullscreen .voice-bottom-toolbar .voice-activity-menu button::after { display: none !important; }
+  .voice-activity-tile footer { position: relative; inset: auto; }
+  .home-hub .dm-page { min-height: 0; grid-template-rows: minmax(0, 28dvh) minmax(0, 1fr); }
+  .dm-sidebar { max-height: none !important; overflow-y: auto; }
+  .dm-conversation { min-height: 0; overflow: hidden; }
+  .dm-messages { min-height: 0; overflow-y: auto; }
+  .dialog-card { max-width: calc(100vw - 16px); }
+  .settings-content .settings-create { display: grid; grid-template-columns: minmax(0, 1fr) !important; }
+}
+
+@media (max-width: 380px) {
+  .voice-fullscreen .voice-bottom-toolbar { gap: 2px !important; padding-inline: 4px !important; }
+  .voice-fullscreen .voice-bottom-toolbar button { width: 36px !important; height: 36px !important; }
+  .voice-fullscreen .voice-stage,
+  .voice-lobby-stage { bottom: 156px !important; }
+}
+
+@media (max-height: 520px) and (min-width: 621px) {
+  .settings-overlay > .settings-content { overflow-y: auto !important; }
+  .voice-fullscreen .voice-stage { bottom: 76px; }
+  .voice-fullscreen .voice-bottom-toolbar { bottom: 4px; }
+}

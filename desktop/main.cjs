@@ -56,7 +56,6 @@ function createWindow() {
   });
   let cacheRefreshDone = false;
   win.webContents.on('did-navigate', (_event, url) => {
-    console.log(`[LibraCord desktop] loaded ${url}`);
     // A remote reverse proxy may serve a previously cached index even when
     // the URL contains a cache-busting query. Force one renderer refresh after
     // the selected web app has navigated, while avoiding a reload loop.
